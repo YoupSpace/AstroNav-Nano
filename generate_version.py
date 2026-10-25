@@ -142,10 +142,19 @@ def parse_semantic_describe_output(describe_text):
 
 
 def get_last_known_firmware_version():
+    header_candidates = [pathlib.Path("include") / "build_info.h"]
     try:
         header_text = run_git_command(["git", "show", "HEAD:include/build_info.h"])
-    except Exception:
-        return [0, 0, 0]
+    except (OSError, subprocess.SubprocessError):
+        header_text = ""
+
+    if not header_text:
+        for header_path in header_candidates:
+            try:
+                header_text = header_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            break
 
     match = re.search(r'#define AUTO_VERSION "(?:firmware-)?v?(\d+)\.(\d+)\.(\d+)(?:_|\")', header_text, re.IGNORECASE)
     if match is None:
@@ -157,13 +166,28 @@ def get_last_known_firmware_version():
 def get_required_firmware_tag_info():
     try:
         head_short_sha = run_git_command(["git", "rev-parse", "--short=7", "HEAD"]).lower()
-    except Exception as error:
-        raise RuntimeError("FATAL: Unable to read git commit hash for HEAD.") from error
+    except (OSError, subprocess.SubprocessError):
+        fallback_version = get_last_known_firmware_version()
+        fallback_tag = build_semantic_commit_version(fallback_version, 0, "nogit00")
+        print(
+            color_text(
+                ANSI_YELLOW,
+                "WARNING: Git metadata is unavailable. Building with local fallback version "
+                f"{fallback_tag}.",
+            )
+        )
+        return {
+            "tag": fallback_tag,
+            "version": fallback_version,
+            "base_tag": "local",
+            "ahead_count": 0,
+            "commit_sha": "nogit00",
+        }
 
     try:
         head_tags = run_git_command(["git", "tag", "--points-at", "HEAD", "--sort=-v:refname"])
-    except Exception as error:
-        raise RuntimeError("FATAL: Unable to read git tags for the current commit.") from error
+    except (OSError, subprocess.SubprocessError):
+        head_tags = ""
 
     for candidate in head_tags.splitlines():
         parsed = parse_semantic_firmware_tag(candidate)
@@ -952,6 +976,34 @@ def finalize_upload_status():
     print_device_health(UPLOAD_STATUS["upload_port"])
 
 
+def remove_stale_firmware_artifacts(platformio_env, current_program_name):
+    build_dir = pathlib.Path(platformio_env.subst("$BUILD_DIR"))
+    if not build_dir.is_dir():
+        return
+
+    removed_names = []
+    current_prefix = f"{current_program_name}."
+    artifact_paths = list(build_dir.glob("firmware-*")) + list(build_dir.glob("firmware.*"))
+    for artifact_path in artifact_paths:
+        if not artifact_path.is_file() or artifact_path.name.startswith(current_prefix):
+            continue
+        try:
+            artifact_path.unlink()
+        except OSError as error:
+            raise RuntimeError(
+                f"FATAL: Unable to remove stale firmware artifact '{artifact_path}'."
+            ) from error
+        removed_names.append(artifact_path.name)
+
+    if removed_names:
+        print(
+            color_text(
+                ANSI_CYAN,
+                "INFO: Removed stale firmware artifacts: " + ", ".join(sorted(removed_names)),
+            )
+        )
+
+
 def main(cli_args):
     enable_windows_virtual_terminal()
     platformio_env = try_import_platformio_env()
@@ -959,6 +1011,10 @@ def main(cli_args):
     output_path = get_output_path(cli_args)
     firmware_tag_info = get_required_firmware_tag_info()
     version = firmware_tag_info["tag"]
+    if platformio_env is not None:
+        program_name = f"firmware-{version}"
+        platformio_env.Replace(PROGNAME=program_name)
+        remove_stale_firmware_artifacts(platformio_env, program_name)
     hardware_major, hardware_minor = get_hardware_version(platformio_env)
     initial_firmware = firmware_tag_info["version"]
     now = datetime.datetime.now()
@@ -1055,6 +1111,7 @@ def main(cli_args):
 
     print(color_text(ANSI_CYAN, f"--- Automated Versioning: Building {version} ---"))
     print(color_text(ANSI_CYAN, f"--- Generated build info header: {output_path} ---"))
+    print(color_text(ANSI_CYAN, f"--- Firmware artifact name: firmware-{version}.uf2 ---"))
 
     if platformio_env is not None:
         platformio_env.Append(CPPDEFINES=[("AUTO_VERSION", f'\\"{version}\\"')])
