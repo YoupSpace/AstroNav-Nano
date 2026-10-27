@@ -44,8 +44,6 @@ bool isPlaceholderSerial(const char *serialNumber) {
   return !serialNumber || serialNumber[0] == '\0' || strcmp(serialNumber, "AN-0001") == 0;
 }
 
-extern "C" bool tud_disconnect(void);
-
 /*
  * AstroNav flight firmware for RP2350
  * - Startup health check with LED status
@@ -228,7 +226,8 @@ bool imuInitialized = false;
 bool storageReady = false;
 bool usbDriveReady = false;
 bool usbFlightOverride = false;
-bool usbExitRequested = false;
+volatile bool usbExitRequested = false;   // set by the USB eject callback
+volatile bool usbMediaPresent = false;   // shared with the USB task callbacks
 bool settingsNeedPersist = false;
 bool missionLogFlushed = false;
 bool pyroLatched = false;
@@ -393,6 +392,21 @@ uint8_t readRegister(uint8_t csPin, uint8_t regAddr);
 void writeRegister(uint8_t csPin, uint8_t regAddr, uint8_t value, SPISettings settings);
 void writeRegister(uint8_t csPin, uint8_t regAddr, uint8_t value);
 ImuSample decodeSample(const uint8_t *rawData);
+
+// Shown at boot so an unexpected reboot (crash, watchdog, brownout) is visible in the log.
+const char *resetReasonText() {
+  switch (rp2040.getResetReason()) {
+    case RP2040::PWRON_RESET: return "power_on";
+    case RP2040::RUN_PIN_RESET: return "run_pin";
+    case RP2040::SOFT_RESET: return "software";
+    case RP2040::WDT_RESET: return "watchdog";
+    case RP2040::DEBUG_RESET: return "debugger";
+    case RP2040::GLITCH_RESET: return "glitch";
+    case RP2040::BROWNOUT_RESET: return "brownout";
+    case RP2040::UNKNOWN_RESET:
+    default: return "unknown";
+  }
+}
 
 const char *boolText(bool value) {
   return value ? "OK" : "FAIL";
@@ -1458,11 +1472,21 @@ void ensureUsbInfoFiles() {
   persistDeviceProfile();
 }
 
+// Runs in the USB task when the host ejects the drive. Only sets flags: the flash may not
+// be touched here, and from now on the host is told the medium is gone so it stops reading.
 void onUsbStorageUnplug(uint32_t cbData) {
   (void) cbData;
+  usbMediaPresent = false;
   if (!usbFlightOverride) {
     usbExitRequested = true;
   }
+}
+
+// TEST UNIT READY: false makes the host treat the drive as removed, so it cannot access
+// the flash while the firmware leaves USB mode.
+bool usbStorageDriveReady(uint32_t cbData) {
+  (void) cbData;
+  return usbMediaPresent;
 }
 
 bool shouldExitUsbModeFromUsbFiles() {
@@ -1476,25 +1500,33 @@ bool shouldExitUsbModeFromUsbFiles() {
 void enterFlightModeFromUsb() {
   usbFlightOverride = true;
   usbExitRequested = false;
+  usbMediaPresent = false;
 
+  // 1. Detach the drive from the host before the firmware touches the flash. The host and
+  //    the firmware must never access the flash translation layer at the same time.
+  //    end() removes only the storage interface; USB serial stays available.
+  if (usbDriveReady) {
+    FatFSUSB.end();
+    usbDriveReady = false;
+    boardHealth.usbStorageOk = false;
+  }
+
+  // 2. Remount so cached FAT data from before the USB session is dropped; the host may
+  //    have edited Settings.ini or removed logs.
+  if (storageReady) {
+    FatFS.end();
+    storageReady = FatFS.begin();
+    boardHealth.flashFsOk = storageReady;
+    Serial.printf("[USB] Drive detached, filesystem remounted ok=%s\n", boolText(storageReady));
+  }
+
+  // 3. Now it is safe to read the edited settings and prepare the next flight on the ground.
   if (storageReady) {
     loadFlightSettings();
     if (settingsNeedPersist) {
       persistDeviceProfile();
       settingsNeedPersist = false;
     }
-  }
-
-  if (usbDriveReady) {
-    FatFSUSB.unplug();
-    usbDriveReady = false;
-    boardHealth.usbStorageOk = false;
-  }
-
-  tud_disconnect();
-
-  // Logs may have been added or removed over USB; pick the flight number now, on the ground.
-  if (storageReady) {
     prepareNextFlightNumber();
   }
 
@@ -2339,6 +2371,7 @@ void setup() {
   Serial.println("=============================================");
   Serial.println("  AstroNav flight firmware");
   Serial.println("=============================================");
+  Serial.printf("[BOOT] firmware=%s reset_reason=%s\n", AUTO_VERSION, resetReasonText());
 
   initializeAstroNavOtp();
   printAstroNavOtpSummary();
@@ -2447,13 +2480,18 @@ void setup() {
                 boardHealth.critical ? "YES" : "NO");
   if (powerMode == PowerMode::USB && storageReady && !usbFlightOverride) {
     Serial.println("[BOOT] stage=usb_begin");
+    // Write the drive's files before exporting it: once the host has the drive, the firmware
+    // must not write the flash. USB_STORAGE_OK is written as the expected state.
+    boardHealth.usbStorageOk = true;
+    ensureUsbInfoFiles();
+    usbMediaPresent = true;
     FatFSUSB.onUnplug(onUsbStorageUnplug);
+    FatFSUSB.driveReady(usbStorageDriveReady);
     usbDriveReady = FatFSUSB.begin();
     boardHealth.usbStorageOk = usbDriveReady;
     if (!usbDriveReady) {
       boardHealth.warning = true;
     }
-    ensureUsbInfoFiles();
     Serial.printf("[BOOT] stage=usb_complete ok=%s\n", boolText(usbDriveReady));
   }
 

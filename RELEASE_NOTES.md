@@ -1,3 +1,21 @@
+# AstroNav Nano Firmware v1.2.1
+
+Bug-fix release for leaving USB mode. Updating from v1.2.0 does not erase your logs or settings.
+
+## Fixes
+
+- **Ejecting the USB drive could leave the board stuck in USB mode.** After an eject, the firmware read and wrote `Settings.ini` while the drive was still attached to the computer. The computer and the board could then use the flash at the same time, and the board could crash and reboot back into USB mode. The board now detaches the drive first, tells the computer the drive is gone, remounts the filesystem, and only then reads your settings. The same applies to the `EXITUSB` and `FLIGHT` serial commands.
+- **Edits made over USB are reliably picked up.** The filesystem is remounted after the USB session, so changes to `Settings.ini` are read fresh instead of from data cached before the session.
+- **No file writes while the drive is attached.** At boot, `Howto.txt`, `Website.url` and `Settings.ini` are now written before the drive is shown to the computer.
+- **Health readback after upload.** The upload script asked the board for its health only once, while the board was still booting and re-connecting USB, so it often reported `readback unavailable`. It now retries for up to 20 seconds.
+
+## Changes
+
+- **USB serial stays available after leaving USB mode.** Previously the whole USB connection was dropped. Now only the drive is removed, so `DUMP_HEALTH`, `DUMP_OTP` and the ground `PYROTEST` keep working on USB power.
+- **Reset reason at boot:** the serial log now starts with `[BOOT] firmware=... reset_reason=...`, so an unexpected reboot (crash, watchdog, brownout) is visible right away.
+
+---
+
 # AstroNav Nano Firmware v1.2.0
 
 A safety and reliability release. Apogee, pyro and landing decisions have been reworked, flight logs are more complete and more robust, and several bugs that could lose data or settings are fixed.

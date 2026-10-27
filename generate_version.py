@@ -53,6 +53,7 @@ TRUE_ENV_VALUES = {"1", "true", "yes", "y", "on"}
 # Only ports of this USB vendor (Raspberry Pi, RP2040/RP2350) are probed besides the upload port,
 # so serial commands are never sent to unrelated devices such as printers or other boards.
 RASPBERRY_PI_USB_VID = 0x2E8A
+HEALTH_READBACK_TIMEOUT_S = 20.0
 
 UPLOAD_STATUS = {
     "requested": False,
@@ -676,18 +677,24 @@ def read_health_from_device(upload_port):
     except Exception:
         return None
 
-    for candidate in get_candidate_serial_ports(upload_port, list_ports):
-        try:
-            with serial.Serial(candidate, 115200, timeout=0.25, write_timeout=1) as port:
-                port.reset_input_buffer()
-                port.write(b"\nDUMP_HEALTH\n")
-                deadline = time.monotonic() + 3.0
-                while time.monotonic() < deadline:
-                    match = HEALTH_LINE_PATTERN.search(port.readline().decode("utf-8", errors="ignore"))
-                    if match:
-                        return match.groupdict()
-        except Exception:
-            continue
+    # Right after an upload the board is still booting: commands are only handled once setup()
+    # has finished, and starting the USB drive re-enumerates USB, so the port briefly disappears.
+    # Keep retrying (re-opening the port) until the board answers or the deadline passes.
+    discovery_deadline = time.monotonic() + HEALTH_READBACK_TIMEOUT_S
+    while time.monotonic() < discovery_deadline:
+        for candidate in get_candidate_serial_ports(upload_port, list_ports):
+            try:
+                with serial.Serial(candidate, 115200, timeout=0.25, write_timeout=1) as port:
+                    port.reset_input_buffer()
+                    port.write(b"\nDUMP_HEALTH\n")
+                    answer_deadline = time.monotonic() + 2.0
+                    while time.monotonic() < answer_deadline:
+                        match = HEALTH_LINE_PATTERN.search(port.readline().decode("utf-8", errors="ignore"))
+                        if match:
+                            return match.groupdict()
+            except Exception:
+                continue
+        time.sleep(0.5)
     return None
 
 

@@ -191,6 +191,8 @@ When the board is powered by USB:
 
 The alternative `EXITUSB` serial command can request the same transition. Never unplug during an active write when a safe eject is available.
 
+After the eject the drive disappears, the board reloads `Settings.ini` (including any edits you made) and calibrates; keep it still. The USB serial port stays available in flight mode, so `DUMP_HEALTH` and the ground `PYROTEST` keep working while USB-powered.
+
 ### Basic: retrieve a flight log
 
 After the flight has landed and the board has finished saving:
