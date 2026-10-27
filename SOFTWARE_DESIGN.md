@@ -131,6 +131,49 @@ The program stores a small set of global runtime state:
 - current measured input voltage
 - current detected power source text
 
+## Flight Log Storage
+
+A flight is recorded in two stages: samples are collected in a RAM buffer during the flight and written to the flash filesystem as a CSV file after landing (or after the landing timeout).
+
+### Current configuration
+
+| Setting | Where | Value | Meaning |
+|---|---|---|---|
+| RAM log buffer | `FLIGHT_LOG_CAPACITY` in [src/main.cpp](src/main.cpp) | 6144 samples | 44 bytes per sample = 270 KB, 307 s at 20 Hz |
+| Flash filesystem | `board_build.filesystem_size` in [platformio.ini](platformio.ini) | 2M | Holds `Settings.ini`, the info files and `/logs/Flight_*.csv` |
+
+Rule of thumb for planning:
+
+- RAM: 880 bytes per second of flight (20 samples/s x 44 bytes).
+- Flash: about 135 bytes per CSV row, so about 2.7 KB per second of flight. A full 307 s log is roughly 830 KB; a typical 60 s flight is roughly 160 KB.
+- The landing timeout is at least 300 s, so with default settings a flight is saved before the RAM buffer runs out.
+
+### Long flights and full storage
+
+- Nothing is written to flash between launch and landing for normal flights. Only when a flight outlasts 75% of the RAM buffer, the pyro decision is final and the state is `Descent`, the oldest samples are moved to the log file in batches of 20 rows per sample tick, so the descent keeps being logged. Such a log has the usual header (summary so far) and `FINAL_` summary lines at the end of the file.
+- If the RAM buffer fills before apogee (very long climb or coast), further samples are dropped and counted in `RAM_DROPPED_SAMPLES`.
+- Before writing, the firmware checks free space and keeps a 16 KB reserve for `Settings.ini`. Rows that do not fit are counted (`STORAGE_DROPPED_SAMPLES` / `STORAGE_FULL` line in the log, `LAST_LOG_STATUS` in `Settings.ini`), never silently cut off. Existing files are never deleted by the firmware.
+- Altitude and vertical speed are stored as 32-bit values, so flights above 327 m or faster than 327 m/s are logged without saturation.
+
+### Adjusting the storage
+
+Both values can be changed, but keep these limits in mind:
+
+- **RAM buffer:** the RP2350 has 512 KB RAM. With 6144 samples the firmware uses about 288 KB statically, leaving about 230 KB for heap and stack (FatFS, the flash translation layer, USB mass storage, file buffers). Keep at least 64 KB free. The practical maximum is about 9000 samples. Check the `RAM:` line of the build output after every change.
+- **Flash filesystem:** the board has 4 MB flash. Firmware, filesystem and the 4 KB EEPROM area share it, so `filesystem_size` can go up to about 3.5 MB while the firmware stays below about 500 KB. A larger filesystem also uses a little more heap for the flash translation layer (about 8 KB per extra MB).
+- **Changing `filesystem_size` reformats the filesystem on the first boot after the upload.** The filesystem start address moves, the old metadata no longer matches and is discarded, and a fresh empty filesystem is created. Copy all logs off the board first and re-enter your `Settings.ini` values afterwards.
+- Saving a long log takes several seconds after landing (estimated 10-20 s for a full buffer). The status LED can stop updating during that time; do not remove power until it continues.
+
+### Symptoms of a storage configuration that is too large
+
+If the flight controller starts behaving strangely after the storage was changed, suspect memory first:
+
+- unexpected reboots or freezes, especially while saving a log, while the USB drive is mounted, or right after boot
+- the USB drive not appearing or appearing empty
+- `FLASH_FS_OK` / `flashFs` reporting `FAIL`, or `Settings.ini` resetting itself
+
+These usually mean the heap or stack has run out. Reduce `FLIGHT_LOG_CAPACITY` (for example back to 4096 or 2048) and rebuild; the RAM buffer does not affect the files on flash.
+
 ## Constants
 
 ### Sensor scaling

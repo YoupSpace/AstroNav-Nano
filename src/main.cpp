@@ -49,49 +49,83 @@ extern "C" bool tud_disconnect(void);
 /*
  * AstroNav flight firmware for RP2350
  * - Startup health check with LED status
-  storageReady = ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES ? false : FatFS.begin();
  * - Launch and apogee detection
  * - Safe pyro pulse and lockout
  * - RAM mission log flushed to flash after landing
  * - USB mass-storage mode when powered from USB
  */
 
-static constexpr float ACCEL_LSB_PER_G = 1024.0f;
-static constexpr float GYRO_LSB_PER_DPS = 16.4f;
-static constexpr float ADC_VREF = 3.3f;
-static constexpr float ADC_COUNTS = 4095.0f;
-static constexpr float VIN_DIVIDER_TOP_OHMS = 20000.0f;
-static constexpr float VIN_DIVIDER_BOTTOM_OHMS = 10000.0f;
-static constexpr float VIN_DIVIDER_RATIO =
-  (VIN_DIVIDER_TOP_OHMS + VIN_DIVIDER_BOTTOM_OHMS) / VIN_DIVIDER_BOTTOM_OHMS;
+// Sensor scaling, ADC and calibration constants live in hardware_control.cpp.
 static constexpr float LIPO_1S_LOW_VOLTAGE = 3.5f;
 static constexpr float LIPO_2S_LOW_VOLTAGE = 7.0f;
 
 static constexpr uint32_t SAMPLE_PERIOD_MS = 50;
 static constexpr uint32_t LED_PERIOD_MS = 25;
 static constexpr uint32_t BOOT_PULSE_MS = 2000;
-static constexpr uint32_t CALIBRATION_TIMEOUT_MS = 6000;
-static constexpr uint8_t CALIBRATION_GOOD_SAMPLES = 20;
-static constexpr float STATIONARY_ACCEL_TOLERANCE_G = 0.08f;
-static constexpr float STATIONARY_GYRO_TOLERANCE_DPS = 20.0f;
 static constexpr float LAUNCH_THRESHOLD_G = 1.35f;
 static constexpr uint8_t LAUNCH_CONFIRM_SAMPLES = 3;
 static constexpr uint8_t BOOST_DECAY_CONFIRM_SAMPLES = 3;
 static constexpr uint32_t LAUNCH_MIN_TIME_MS = 400;
 static constexpr float APOGEE_DROP_M = 0.25f;
 static constexpr float APOGEE_VELOCITY_THRESHOLD_MPS = -0.25f;
-static constexpr float APOGEE_ACCEL_MAX_G = 0.90f;
+// Near apogee the rocket is in free fall (~0 g). On the ground, carried, or swinging
+// in a tree it reads 0.7-1.3 g, so this keeps apogee from triggering there.
+static constexpr float APOGEE_ACCEL_MAX_G = 0.50f;
 static constexpr uint8_t APOGEE_CONFIRM_SAMPLES = 3;
+static constexpr uint8_t APOGEE_CONFIRM_SAMPLES_NEAR_EXPECTED = 2;
+static constexpr float APOGEE_MIN_DROP_M = 0.30f;            // above baro noise
+static constexpr float APOGEE_PEAK_HOLD_BAND_M = 0.30f;
+static constexpr float APOGEE_PEAK_HOLD_MAX_SPEED_MPS = 0.50f;
+static constexpr float APOGEE_BACKUP_DROP_MIN_M = 0.5f;
+static constexpr float APOGEE_BACKUP_DROP_MAX_M = 5.0f;
+// Without the IMU's free-fall check, the barometer must show a real descent.
+static constexpr float APOGEE_BARO_ONLY_DESCENT_MPS = -1.0f;
+// If the pyro was blocked only by a momentary barometer glitch, it may still fire
+// shortly after apogee; later than this the parachute timing would be wrong.
+static constexpr uint32_t PYRO_RETRY_WINDOW_MS = 1000;
 static constexpr float LANDING_ALTITUDE_TOLERANCE_M = 2.0f;
 static constexpr float LANDING_VELOCITY_TOLERANCE_MPS = 0.25f;
-static constexpr uint8_t LANDING_CONFIRM_SAMPLES = 15;
-static constexpr uint32_t PYRO_PULSE_MS = 1000;
+static constexpr uint8_t LANDING_CONFIRM_SAMPLES = 20;
+// Without a detected apogee, require a longer quiet period so the near-zero
+// velocity around apogee cannot be mistaken for a landing.
+static constexpr uint8_t LANDING_CONFIRM_SAMPLES_WITHOUT_APOGEE = 60;
+// A single sensor cannot be cross-checked, so it must stay calm for longer.
+static constexpr uint8_t LANDING_CONFIRM_SAMPLES_SINGLE_IMU = 100;
+static constexpr uint32_t LANDING_TIMEOUT_MIN_MS = 300000;
+static constexpr uint32_t LANDING_TIMEOUT_MAX_MS = 1800000;
+static constexpr float LANDING_SLOWEST_DESCENT_MPS = 2.0f;
+// "Calm" = resting still; "minimal" = small rocking (wind) but clearly not flying or swinging.
+static constexpr float LANDING_IMU_CALM_ACCEL_G = 0.08f;
+static constexpr float LANDING_IMU_CALM_ACCEL_SPAN_G = 0.05f;
+static constexpr float LANDING_IMU_CALM_GYRO_DPS = 5.0f;
+static constexpr float LANDING_IMU_MINIMAL_ACCEL_G = 0.20f;
+static constexpr float LANDING_IMU_MINIMAL_ACCEL_SPAN_G = 0.25f;
+static constexpr float LANDING_IMU_MINIMAL_GYRO_DPS = 30.0f;
+static constexpr float LANDING_BARO_CALM_SPAN_M = 0.6f;
+static constexpr float LANDING_BARO_MINIMAL_SPAN_M = 1.0f;   // < 1 m/s: slower than any realistic parachute descent
+static constexpr uint8_t SENSOR_HISTORY_SAMPLES = 20;   // 1 s at SAMPLE_PERIOD_MS
+static constexpr uint8_t VELOCITY_WINDOW_SAMPLES = 8;   // 0.4 s slope, ~0.2 s lag
+static constexpr float ALTITUDE_FILTER_ALPHA = 0.5f;
+static constexpr float BARO_SPIKE_NOISE_MARGIN_M = 2.0f;
+// The allowed jump already grows with the time since the last accepted sample, so real
+// changes are accepted on their own; this only re-anchors after 1 s of disagreement.
+static constexpr uint8_t BARO_SPIKE_MAX_CONSECUTIVE_REJECTS = 20;
+// Without fresh barometer data, extrapolate at most 0.5 s and then hold the altitude.
+static constexpr uint8_t BARO_MAX_EXTRAPOLATION_SAMPLES = 10;
 static constexpr uint32_t PYRO_TEST_CONFIRM_WINDOW_MS = 5000;
 static constexpr uint32_t APOGEE_FIRE_MAX_MS = 500;
 static constexpr uint8_t APOGEE_HOLD_SAMPLES = 8;
 static constexpr uint32_t SENSOR_FAILURE_WINDOW_MS = 1000;
 static constexpr uint8_t SENSOR_FAILURE_LIMIT = 5;
-static constexpr uint16_t FLIGHT_LOG_CAPACITY = 2048;
+// RAM flight log: 6144 samples x 44 bytes = 270 KB = 307 s at SAMPLE_PERIOD_MS.
+// Adjustable; see "Flight Log Storage" in SOFTWARE_DESIGN.md before changing it.
+static constexpr uint16_t FLIGHT_LOG_CAPACITY = 6144;
+// Long flights: start moving the oldest samples to flash at 75% full, 20 rows per sample tick.
+static constexpr uint16_t LOG_STREAM_START_SAMPLES = (FLIGHT_LOG_CAPACITY / 4) * 3;
+static constexpr uint16_t LOG_STREAM_BATCH_SAMPLES = 20;
+static constexpr size_t LOG_ROW_MAX_BYTES = 256;
+static constexpr uint64_t LOG_STORAGE_RESERVE_BYTES = 16384;   // keeps room to rewrite Settings.ini
+static constexpr uint8_t LOG_MAX_OPEN_ATTEMPTS = 3;
 static constexpr uint8_t PRELAUNCH_SAMPLE_CAPACITY = 20;
 static constexpr uint32_t PROFILE_MAGIC = 0x50455246;   // "FRFP"
 static constexpr uint32_t PROFILE_VERSION = 1;
@@ -120,19 +154,6 @@ enum class PowerMode {
   LiPo2S
 };
 
-enum class FlightState {
-  Booting,
-  Calibrating,
-  Idle,
-  UsbMode,
-  Armed,
-  Boost,
-  Coast,
-  PyroFired,
-  Landed,
-  Fault
-};
-
 enum class LedProfile {
   Boot,
   Calibrating,
@@ -158,16 +179,16 @@ struct FlightSample {
   int16_t tempCd10 = 0;
   uint16_t pressureHd10 = 0;
   int16_t batteryVoltageMv = 0;
-  int16_t altitudeCm = 0;
-  int16_t velocityCms = 0;
+  // 32-bit so high and fast flights do not saturate (16-bit cm would cap at 327 m and 327 m/s).
+  // The apogee-drop CSV columns are derived from these when the log is written.
+  int32_t altitudeCm = 0;
+  int32_t velocityCms = 0;
   int16_t rollD10 = 0;
   int16_t pitchD10 = 0;
-  int16_t estimatedApogeeDropCm = 0;
-  int16_t actualApogeeDropCm = 0;
-  int16_t apogeeDropErrorCm = 0;
   uint8_t healthBits = 0;
   uint8_t state = 0;
   uint8_t pyro = 0;
+  uint8_t baroRejected = 0;
 };
 
 struct FlightSettings {
@@ -177,6 +198,7 @@ struct FlightSettings {
   float speedMarginMps = 8.0f;
   float launchThresholdG = 1.35f;
   bool firePyroAtApogee = true;
+  float minPyroFireHeightM = 5.0f;
 };
 
 struct DeviceProfile {
@@ -252,7 +274,6 @@ float gravityAxisZ = 1.0f;
 float gyroBiasX = 0.0f;
 float gyroBiasY = 0.0f;
 float gyroBiasZ = 0.0f;
-float lastAltitudeForVelocity = 0.0f;
 
 uint8_t launchConfirmCount = 0;
 uint8_t boostDecayConfirmCount = 0;
@@ -267,12 +288,49 @@ uint32_t baroFailureWindowStartMs = 0;
 uint32_t logCounter = 0;
 float peakFlightSpeedMps = 0.0f;
 float peakAccelMagG = 0.0f;
+bool apogeeDetected = false;
+float detectedApogeeAltitudeM = 0.0f;
+uint32_t detectedApogeeMs = 0;
+const char *apogeeTrigger = "none";
+const char *landingTrigger = "none";
+
+float altitudeHistory[SENSOR_HISTORY_SAMPLES] = {0};
+float accelMagHistory[SENSOR_HISTORY_SAMPLES] = {0};
+uint8_t altitudeHistoryIndex = 0;
+uint8_t altitudeHistoryCount = 0;
+uint8_t accelHistoryIndex = 0;
+uint8_t accelHistoryCount = 0;
+float lastAcceptedRawAltitude = 0.0f;
+uint8_t baroConsecutiveRejects = 0;
+bool baroSampleFresh = false;
+bool baroSampleRejected = false;
+uint32_t baroRejectedSamples = 0;
+float flightMaxPlausibleSpeedMps = 100.0f;
+float flightExpectedApogeeLowM = 100.0f;
+float flightExpectedApogeeHighM = 140.0f;
+float flightMinPyroFireHeightM = 5.0f;
+float launchAltitudeM = 0.0f;
+uint32_t pyroRetryUntilMs = 0;
+const char *pyroBlockedReason = "none";
+uint32_t sampleGaps = 0;
+
+struct MissionLogSummary {
+  float maxAltitudeM = 0.0f;
+  float maxSpeedMps = 0.0f;
+  float maxAccelG = 0.0f;
+  float maxBatteryV = 0.0f;
+  float lastAltitudeM = 0.0f;
+};
+MissionLogSummary logSummary;
+bool missionLogStreaming = false;
+uint32_t missionLogRowsWritten = 0;
+uint32_t missionLogRowsDropped = 0;   // did not fit on flash
+uint32_t missionLogRamDropped = 0;    // RAM buffer full before the descent
+uint8_t missionLogOpenAttempts = 0;
+const char *lastLogStatus = "none";
 
 float flightLaunchThresholdG = 1.35f;
 float flightApogeeDropM = 0.25f;
-float flightApogeeVelocityThresholdMPS = -0.25f;
-float flightLandingAltitudeToleranceM = 2.0f;
-float flightLandingVelocityToleranceMPS = 0.25f;
 bool pyroFireAtApogeeAllowed = true;
 
 FlightSettings flightSettings;
@@ -283,6 +341,7 @@ FlightSample prelaunchSamples[PRELAUNCH_SAMPLE_CAPACITY];
 uint16_t missionLogCount = 0;
 uint8_t prelaunchSampleCount = 0;
 uint32_t currentFlightNumber = 0;
+uint32_t nextFlightNumber = 1;
 
 char missionLogPath[48] = {0};
 char lastFaultReason[96] = "none";
@@ -300,13 +359,18 @@ bool readImuFrame(float &ax, float &ay, float &az, float &gx, float &gy, float &
 bool verifyImuStream();
 bool configureImu();
 bool calibratePadOrientation();
+void resetAltitudeEstimator();
 void appendMissionSample();
 void flushMissionLogToFlash();
+void streamMissionLogIfNeeded();
+void resetMissionLogWriter();
+uint64_t logStorageAvailableBytes();
 void firePyro();
 void updatePyroOutput();
 void updateFlightStateFromSamples();
 void recordFaultAndSafeStop();
 void startMissionLog();
+void prepareNextFlightNumber();
 void finalizeFlightPersonalRecords();
 void ensureLogsDirectory();
 void handleSerialCommand(const char *command);
@@ -322,7 +386,7 @@ void syncAssetsFromDeviceProfile();
 void buildFaultReason(char *buffer, size_t bufferSize);
 uint8_t healthBits();
 bool systemHealthy();
-uint32_t countAndCleanFlightLogs();
+uint32_t scanFlightLogs(uint32_t &flightLogCount);
 
 uint8_t readRegister(uint8_t csPin, uint8_t regAddr, SPISettings settings);
 uint8_t readRegister(uint8_t csPin, uint8_t regAddr);
@@ -343,7 +407,7 @@ const char *stateText(FlightState state) {
     case FlightState::Armed: return "armed";
     case FlightState::Boost: return "boost";
     case FlightState::Coast: return "coast";
-    case FlightState::PyroFired: return "pyro";
+    case FlightState::Descent: return "descent";
     case FlightState::Landed: return "landed";
     case FlightState::Fault:
     default: return "fault";
@@ -373,13 +437,13 @@ bool setFlightState(FlightState nextState) {
       allowed = (nextState == FlightState::Boost || nextState == FlightState::Fault);
       break;
     case FlightState::Boost:
-      allowed = (nextState == FlightState::Coast || nextState == FlightState::PyroFired ||
+      allowed = (nextState == FlightState::Coast || nextState == FlightState::Descent ||
                  nextState == FlightState::Landed || nextState == FlightState::Fault);
       break;
     case FlightState::Coast:
-      allowed = (nextState == FlightState::PyroFired || nextState == FlightState::Landed || nextState == FlightState::Fault);
+      allowed = (nextState == FlightState::Descent || nextState == FlightState::Landed || nextState == FlightState::Fault);
       break;
-    case FlightState::PyroFired:
+    case FlightState::Descent:
       allowed = (nextState == FlightState::Landed || nextState == FlightState::Fault);
       break;
     case FlightState::Landed:
@@ -460,25 +524,24 @@ uint32_t checksumBytes(const uint8_t *data, size_t length) {
 }
 
 void applyFlightSettings() {
-  float heightMargin = clampFloat(flightSettings.heightMarginM, 0.0f, 1000.0f);
-  float speedMargin = clampFloat(flightSettings.speedMarginMps, 0.0f, 1000.0f);
+  // Same ranges as the Settings.ini validation in loadFlightSettings().
+  float heightMargin = clampFloat(flightSettings.heightMarginM, 0.0f, 100000.0f);
+  float speedMargin = clampFloat(flightSettings.speedMarginMps, 0.0f, 3000.0f);
 
   flightLaunchThresholdG = clampFloat(flightSettings.launchThresholdG, 1.15f, 4.0f);
   pyroFireAtApogeeAllowed = flightSettings.firePyroAtApogee;
 
-  // Keep apogee detection usable on short tosses even when the user estimate is
-  // intentionally conservative. The estimate is a tuning aid, not a hard gate that
-  // can prevent valid apogees on sub-2 m flights.
-  float estimatedDropM = (flightSettings.estimatedHeightM * 0.08f) + (heightMargin * 0.25f);
-  float shortFlightCapDropM = (flightSettings.estimatedHeightM * 0.04f) + (heightMargin * 0.12f) + 0.25f;
-  flightApogeeDropM = clampFloat(fminf(estimatedDropM, shortFlightCapDropM), 0.25f, 50.0f);
+  // The estimates are a baseline only: they tune how fast apogee is confirmed and the
+  // backup drop threshold, but never prevent apogee on a much lower or higher flight.
+  // Backup trigger: a drop of ~1% of the expected apogee, bounded so it stays early.
+  flightApogeeDropM = clampFloat((flightSettings.estimatedHeightM + heightMargin) * 0.01f,
+                                 APOGEE_BACKUP_DROP_MIN_M, APOGEE_BACKUP_DROP_MAX_M);
+  flightExpectedApogeeLowM = flightSettings.estimatedHeightM - heightMargin;
+  flightExpectedApogeeHighM = flightSettings.estimatedHeightM + heightMargin;
+  flightMinPyroFireHeightM = clampFloat(flightSettings.minPyroFireHeightM, 0.0f, 10000.0f);
 
-  float estimatedVelocityThresholdMps = (flightSettings.estimatedSpeedMps * 0.05f) + (speedMargin * 0.15f);
-  float shortFlightCapVelocityThresholdMps = fmaxf(0.25f, flightSettings.estimatedSpeedMps * 0.10f);
-  flightApogeeVelocityThresholdMPS = -clampFloat(fminf(estimatedVelocityThresholdMps, shortFlightCapVelocityThresholdMps), 0.25f, 12.0f);
-
-  flightLandingAltitudeToleranceM = clampFloat(2.0f + (heightMargin * 0.05f), 2.0f, 25.0f);
-  flightLandingVelocityToleranceMPS = clampFloat(0.25f + (speedMargin * 0.05f), 0.25f, 5.0f);
+  // Twice the expected top speed: anything faster between two samples is a sensor glitch.
+  flightMaxPlausibleSpeedMps = clampFloat((flightSettings.estimatedSpeedMps + speedMargin) * 2.0f, 50.0f, 12000.0f);
 }
 
 void makeDefaultFlightSettings() {
@@ -488,6 +551,7 @@ void makeDefaultFlightSettings() {
   flightSettings.speedMarginMps = 8.0f;
   flightSettings.launchThresholdG = 1.35f;
   flightSettings.firePyroAtApogee = true;
+  flightSettings.minPyroFireHeightM = 5.0f;
   applyFlightSettings();
 }
 
@@ -538,6 +602,45 @@ bool parseBoolValue(const char *text) {
   }
   return (strcasecmp(text, "TRUE") == 0) || (strcasecmp(text, "1") == 0) ||
          (strcasecmp(text, "YES") == 0) || (strcasecmp(text, "ON") == 0);
+}
+
+// Accepts only a complete, finite number ("12.5"); rejects "", "abc", "12m", "nan", "inf".
+bool parseFloatSetting(const char *text, float &out) {
+  if (!text || text[0] == '\0') {
+    return false;
+  }
+  char *end = nullptr;
+  float value = strtof(text, &end);
+  if (end == text) {
+    return false;
+  }
+  while (*end == ' ' || *end == '\t') {
+    end++;
+  }
+  if (*end != '\0' || !isfinite(value)) {
+    return false;
+  }
+  out = value;
+  return true;
+}
+
+bool parseStrictBoolValue(const char *text, bool &out) {
+  if (!text) {
+    return false;
+  }
+  while (*text == ' ' || *text == '\t') {
+    text++;
+  }
+  if (parseBoolValue(text)) {
+    out = true;
+    return true;
+  }
+  if (strcasecmp(text, "FALSE") == 0 || strcasecmp(text, "0") == 0 ||
+      strcasecmp(text, "NO") == 0 || strcasecmp(text, "OFF") == 0) {
+    out = false;
+    return true;
+  }
+  return false;
 }
 
 bool readSettingLine(const char *line, const char *key, char *valueBuffer, size_t valueBufferSize) {
@@ -617,13 +720,24 @@ bool loadFlightSettings() {
   }
 
   makeDefaultFlightSettings();
-  bool anyValue = false;
   bool settingsDirty = false;
-  bool estimatedHeightLoaded = false;
-  bool estimatedSpeedLoaded = false;
-  bool heightMarginLoaded = false;
-  bool speedMarginLoaded = false;
-  bool launchThresholdLoaded = false;
+  // Valid ranges: a value outside them (or not a number, NaN, inf) keeps the default and
+  // the file is rewritten, so a typo can never disable launch, apogee or pyro safety.
+  struct FloatSettingField {
+    const char *key;
+    float *target;
+    float minimum;
+    float maximum;
+    bool loaded;
+  };
+  FloatSettingField floatFields[] = {
+    {"ESTIMATED_HEIGHT_M", &flightSettings.estimatedHeightM, 0.0f, 100000.0f, false},
+    {"ESTIMATED_SPEED_MPS", &flightSettings.estimatedSpeedMps, 0.0f, 3000.0f, false},
+    {"HEIGHT_MARGIN_M", &flightSettings.heightMarginM, 0.0f, 100000.0f, false},
+    {"SPEED_MARGIN_MPS", &flightSettings.speedMarginMps, 0.0f, 3000.0f, false},
+    {"LAUNCH_THRESHOLD_G", &flightSettings.launchThresholdG, 1.15f, 4.0f, false},
+    {"MIN_PYRO_FIRE_HEIGHT_M", &flightSettings.minPyroFireHeightM, 0.0f, 10000.0f, false},
+  };
   bool firePyroAtApogeeLoaded = false;
   char currentSection[32] = {0};
   char line[128];
@@ -644,60 +758,46 @@ bool loadFlightSettings() {
     }
 
     char value[64];
-    if (readSettingLine(line, "ESTIMATED_HEIGHT_M", value, sizeof(value))) {
-      estimatedHeightLoaded = true;
-      if (value[0] != '\0') {
-        flightSettings.estimatedHeightM = static_cast<float>(strtof(value, nullptr));
+    bool matched = false;
+    for (FloatSettingField &field : floatFields) {
+      if (!readSettingLine(line, field.key, value, sizeof(value))) {
+        continue;
+      }
+      matched = true;
+      field.loaded = true;
+      float parsed = 0.0f;
+      if (parseFloatSetting(value, parsed) && parsed >= field.minimum && parsed <= field.maximum) {
+        *field.target = parsed;
       } else {
+        Serial.printf("[SETTINGS] Invalid %s='%s' (allowed %.2f..%.2f). Using default %.2f.\n",
+                      field.key, value, field.minimum, field.maximum, *field.target);
         settingsDirty = true;
       }
-      anyValue = true;
-    } else if (readSettingLine(line, "ESTIMATED_SPEED_MPS", value, sizeof(value))) {
-      estimatedSpeedLoaded = true;
-      if (value[0] != '\0') {
-        flightSettings.estimatedSpeedMps = static_cast<float>(strtof(value, nullptr));
-      } else {
-        settingsDirty = true;
-      }
-      anyValue = true;
-    } else if (readSettingLine(line, "HEIGHT_MARGIN_M", value, sizeof(value))) {
-      heightMarginLoaded = true;
-      if (value[0] != '\0') {
-        flightSettings.heightMarginM = static_cast<float>(strtof(value, nullptr));
-      } else {
-        settingsDirty = true;
-      }
-      anyValue = true;
-    } else if (readSettingLine(line, "SPEED_MARGIN_MPS", value, sizeof(value))) {
-      speedMarginLoaded = true;
-      if (value[0] != '\0') {
-        flightSettings.speedMarginMps = static_cast<float>(strtof(value, nullptr));
-      } else {
-        settingsDirty = true;
-      }
-      anyValue = true;
-    } else if (readSettingLine(line, "LAUNCH_THRESHOLD_G", value, sizeof(value))) {
-      launchThresholdLoaded = true;
-      if (value[0] != '\0') {
-        flightSettings.launchThresholdG = static_cast<float>(strtof(value, nullptr));
-      } else {
-        settingsDirty = true;
-      }
-      anyValue = true;
-    } else if (readSettingLine(line, "FIRE_PYRO_APOGEE", value, sizeof(value))) {
+      break;
+    }
+
+    if (!matched && readSettingLine(line, "FIRE_PYRO_APOGEE", value, sizeof(value))) {
       firePyroAtApogeeLoaded = true;
-      if (value[0] != '\0') {
-        flightSettings.firePyroAtApogee = parseBoolValue(value);
+      bool parsed = false;
+      if (parseStrictBoolValue(value, parsed)) {
+        flightSettings.firePyroAtApogee = parsed;
       } else {
+        // Unrecognized text: choose the option that cannot fire the pyro, and show it in the file.
+        Serial.printf("[SETTINGS] Invalid FIRE_PYRO_APOGEE='%s'. Using FALSE.\n", value);
+        flightSettings.firePyroAtApogee = false;
         settingsDirty = true;
       }
-      anyValue = true;
     }
   }
 
   settingsFile.close();
   applyFlightSettings();
-  if (!estimatedHeightLoaded || !estimatedSpeedLoaded || !heightMarginLoaded || !speedMarginLoaded || !launchThresholdLoaded || !firePyroAtApogeeLoaded) {
+  for (const FloatSettingField &field : floatFields) {
+    if (!field.loaded) {
+      settingsDirty = true;
+    }
+  }
+  if (!firePyroAtApogeeLoaded) {
     settingsDirty = true;
   }
 
@@ -746,9 +846,32 @@ void ensureDeviceSerial() {
   snprintf(deviceProfile.serialNumber, sizeof(deviceProfile.serialNumber), "%s", assets.Device_Key.c_str());
 }
 
+// Checksum over the profile exactly as it is written to Settings.ini (same text and
+// number formatting), so a saved profile always verifies when it is read back.
+uint32_t computeProfileChecksum(const char *flashStampText) {
+  char stamp[sizeof(deviceProfile.flashStamp)] = {0};
+  snprintf(stamp, sizeof(stamp), "%s", flashStampText ? flashStampText : "");
+  char canonical[160];
+  int length = snprintf(canonical, sizeof(canonical), "%08lX|%s|%s|%lu|%lu|%.1f|%.1f|%.1f|%.1f",
+                        static_cast<unsigned long>(deviceProfile.magic),
+                        deviceProfile.serialNumber,
+                        stamp,
+                        static_cast<unsigned long>(deviceProfile.flightCount),
+                        static_cast<unsigned long>(deviceProfile.logCount),
+                        deviceProfile.maxFlightAltitudeM,
+                        deviceProfile.maxFlightSpeedMps,
+                        deviceProfile.lastFlightAltitudeM,
+                        deviceProfile.lastFlightSpeedMps);
+  if (length < 0) {
+    length = 0;
+  } else if (static_cast<size_t>(length) >= sizeof(canonical)) {
+    length = sizeof(canonical) - 1;
+  }
+  return checksumBytes(reinterpret_cast<const uint8_t *>(canonical), static_cast<size_t>(length));
+}
+
 void updateDeviceProfileChecksum() {
-  deviceProfile.checksum = 0;
-  deviceProfile.checksum = checksumBytes(reinterpret_cast<const uint8_t *>(&deviceProfile), sizeof(deviceProfile) - sizeof(deviceProfile.checksum));
+  deviceProfile.checksum = computeProfileChecksum(deviceProfile.flashStamp);
 }
 
 void syncAssetsFromDeviceProfile() {
@@ -857,7 +980,7 @@ bool loadOrCreateDeviceProfile() {
     return false;
   }
 
-  uint32_t computedChecksum = checksumBytes(reinterpret_cast<const uint8_t *>(&deviceProfile), sizeof(deviceProfile) - sizeof(deviceProfile.checksum));
+  uint32_t computedChecksum = computeProfileChecksum(deviceProfile.flashStamp);
   if (!anyValue || !checksumPresent || computedChecksum != expectedChecksum) {
     makeDefaultDeviceProfile();
     updateDeviceProfileChecksum();
@@ -904,7 +1027,8 @@ void persistDeviceProfile() {
     }
   }
 
-  updateDeviceProfileChecksum();
+  // FLASH_STAMP is written as firstFlashStamp, so the checksum must cover that value.
+  deviceProfile.checksum = computeProfileChecksum(firstFlashStamp);
   Serial.println("[BOOT] stage=persist_file_open_begin");
   File infoFile = FatFS.open(DEVICE_INFO_FILE, "w");
   Serial.printf("[BOOT] stage=persist_file_open_complete ok=%s\n", boolText(static_cast<bool>(infoFile)));
@@ -927,7 +1051,8 @@ void persistDeviceProfile() {
                                     flightSettings.heightMarginM,
                                     flightSettings.speedMarginMps,
                                     flightSettings.launchThresholdG,
-                                    flightSettings.firePyroAtApogee);
+                                    flightSettings.firePyroAtApogee,
+                                    flightSettings.minPyroFireHeightM);
   infoFile.println();
   infoFile.println("[profile]");
   writeProfileFieldLine(infoFile, "MAGIC", "50455246");
@@ -938,19 +1063,17 @@ void persistDeviceProfile() {
   writeProfileFieldLine(infoFile, "LAST_FLASH_STAMP", deviceProfile.flashStamp);
   infoFile.printf("FLIGHT_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
   infoFile.printf("LOG_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
-  infoFile.print("MAX_FLIGHT_ALTITUDE_M=");
-  infoFile.println(deviceProfile.maxFlightAltitudeM, 1);
-  infoFile.print("MAX_FLIGHT_SPEED_MPS=");
-  infoFile.println(deviceProfile.maxFlightSpeedMps, 1);
-  infoFile.print("LAST_FLIGHT_ALTITUDE_M=");
-  infoFile.println(deviceProfile.lastFlightAltitudeM, 1);
-  infoFile.print("LAST_FLIGHT_SPEED_MPS=");
-  infoFile.println(deviceProfile.lastFlightSpeedMps, 1);
+  // Same "%.1f" formatting as computeProfileChecksum, so the values round-trip exactly.
+  infoFile.printf("MAX_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.maxFlightAltitudeM);
+  infoFile.printf("MAX_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.maxFlightSpeedMps);
+  infoFile.printf("LAST_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.lastFlightAltitudeM);
+  infoFile.printf("LAST_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.lastFlightSpeedMps);
   infoFile.printf("CHECKSUM=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
   infoFile.println();
   infoFile.println("[otp]");
   infoFile.printf("OTP_READ_OK=%s\n", otpReadable ? "TRUE" : "FALSE");
   infoFile.printf("OTP_PAYLOAD_VALID=%s\n", otpStatus.payload_valid ? "TRUE" : "FALSE");
+  infoFile.printf("OTP_HARDWARE_MATCHES_BUILD=%s\n", otpStatus.hardware_matches_build ? "TRUE" : "FALSE");
   infoFile.printf("OTP_BLANK=%s\n", otpStatus.blank ? "TRUE" : "FALSE");
   infoFile.printf("OTP_WRITE_BLOCKED=%s\n", otpStatus.write_blocked ? "TRUE" : "FALSE");
   infoFile.printf("OTP_MAGIC_VALID=%s\n", otpStatus.has_magic_header ? "TRUE" : "FALSE");
@@ -1004,6 +1127,17 @@ void persistDeviceProfile() {
                                   stateText(flightState),
                                   powerModeText(powerMode));
   Serial.println("[BOOT] stage=persist_debug_write_complete");
+  infoFile.println();
+  infoFile.println("[storage]");
+  FSInfo storageInfo = {};
+  if (FatFS.info(storageInfo)) {
+    uint64_t freeBytes = (storageInfo.totalBytes > storageInfo.usedBytes) ? (storageInfo.totalBytes - storageInfo.usedBytes) : 0;
+    infoFile.printf("STORAGE_TOTAL_KB=%lu\n", static_cast<unsigned long>(storageInfo.totalBytes / 1024));
+    infoFile.printf("STORAGE_FREE_KB=%lu\n", static_cast<unsigned long>(freeBytes / 1024));
+    // ~140 bytes per CSV row at 20 rows per second.
+    infoFile.printf("ESTIMATED_LOG_SECONDS_FREE=%lu\n", static_cast<unsigned long>(logStorageAvailableBytes() / (140u * 20u)));
+  }
+  infoFile.printf("LAST_LOG_STATUS=%s\n", lastLogStatus);
   infoFile.close();
   Serial.println("[BOOT] stage=persist_close_complete");
 }
@@ -1094,23 +1228,30 @@ uint8_t healthBits() {
   return bits;
 }
 
-void startMissionLog() {
-  uint32_t highestExistingFlightNumber = countAndCleanFlightLogs();
-  uint32_t candidateFlightNumber = (highestExistingFlightNumber == 0u) ? 1u : (highestExistingFlightNumber + 1u);
-
+// Picks the next free flight number on the ground, so launch needs no flash access.
+void prepareNextFlightNumber() {
+  uint32_t flightLogCount = 0;
+  uint32_t candidateFlightNumber = scanFlightLogs(flightLogCount) + 1u;
+  deviceProfile.logCount = flightLogCount;
+  char path[sizeof(missionLogPath)];
   for (;;) {
-    snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(candidateFlightNumber));
-    if (!FatFS.exists(missionLogPath)) {
+    snprintf(path, sizeof(path), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(candidateFlightNumber));
+    if (!storageReady || !FatFS.exists(path)) {
       break;
     }
     candidateFlightNumber++;
   }
+  nextFlightNumber = candidateFlightNumber;
+}
 
-  currentFlightNumber = candidateFlightNumber;
+// Runs at launch detection: RAM only. The flight count and records are written to
+// flash after landing (finalizeFlightPersonalRecords), never during the flight.
+void startMissionLog() {
+  currentFlightNumber = nextFlightNumber;
+  snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(currentFlightNumber));
   deviceProfile.flightCount = currentFlightNumber;
   assets.TotalFlights = static_cast<uint16_t>(deviceProfile.flightCount > UINT16_MAX ? UINT16_MAX : deviceProfile.flightCount);
   Serial.printf("[LOG] Starting mission file: %s\n", missionLogPath);
-  persistDeviceProfile();
   missionLogCount = 0;
   logCounter = 0;
   for (uint8_t index = 0; index < prelaunchSampleCount; index++) {
@@ -1120,7 +1261,6 @@ void startMissionLog() {
   }
   prelaunchSampleCount = 0;
   peakAltitude = 0.0f;
-  lastAltitudeForVelocity = 0.0f;
   launchConfirmCount = 0;
   boostDecayConfirmCount = 0;
   apogeeConfirmCount = 0;
@@ -1132,6 +1272,16 @@ void startMissionLog() {
   flightRecordsPendingSave = true;
   peakFlightSpeedMps = 0.0f;
   peakAccelMagG = 0.0f;
+  apogeeDetected = false;
+  detectedApogeeAltitudeM = 0.0f;
+  detectedApogeeMs = 0;
+  apogeeTrigger = "none";
+  landingTrigger = "none";
+  baroRejectedSamples = 0;
+  pyroBlockedReason = "none";
+  pyroRetryUntilMs = 0;
+  sampleGaps = 0;
+  resetMissionLogWriter();
 }
 
 void finalizeFlightPersonalRecords() {
@@ -1163,6 +1313,7 @@ void appendMissionSample() {
 
   if (missionStarted && missionLogCount >= FLIGHT_LOG_CAPACITY) {
     boardHealth.warning = true;
+    missionLogRamDropped++;
     return;
   }
 
@@ -1180,17 +1331,14 @@ void appendMissionSample() {
   sample.tempCd10 = static_cast<int16_t>(lroundf(currentTemperature * 10.0f));
   sample.pressureHd10 = static_cast<uint16_t>(lroundf(clampFloat(currentPressure * 10.0f, 0.0f, 65535.0f)));
   sample.batteryVoltageMv = static_cast<int16_t>(lroundf(clampFloat(currentVinVoltage * 1000.0f, -32768.0f, 32767.0f)));
-  sample.altitudeCm = static_cast<int16_t>(lroundf(clampFloat(currentAltitude * 100.0f, -32768.0f, 32767.0f)));
-  sample.velocityCms = static_cast<int16_t>(lroundf(clampFloat(currentVerticalVelocity * 100.0f, -32768.0f, 32767.0f)));
+  sample.altitudeCm = static_cast<int32_t>(lroundf(clampFloat(currentAltitude * 100.0f, -2.0e9f, 2.0e9f)));
+  sample.velocityCms = static_cast<int32_t>(lroundf(clampFloat(currentVerticalVelocity * 100.0f, -2.0e9f, 2.0e9f)));
   sample.rollD10 = static_cast<int16_t>(lroundf(clampFloat(currentRollDeg * 10.0f, -32768.0f, 32767.0f)));
   sample.pitchD10 = static_cast<int16_t>(lroundf(clampFloat(currentPitchDeg * 10.0f, -32768.0f, 32767.0f)));
-  float actualApogeeDropM = fmaxf(0.0f, peakAltitude - currentAltitude);
-  sample.estimatedApogeeDropCm = static_cast<int16_t>(lroundf(clampFloat(flightApogeeDropM * 100.0f, -32768.0f, 32767.0f)));
-  sample.actualApogeeDropCm = static_cast<int16_t>(lroundf(clampFloat(actualApogeeDropM * 100.0f, -32768.0f, 32767.0f)));
-  sample.apogeeDropErrorCm = static_cast<int16_t>(lroundf(clampFloat((actualApogeeDropM - flightApogeeDropM) * 100.0f, -32768.0f, 32767.0f)));
   sample.healthBits = healthBits();
   sample.state = static_cast<uint8_t>(flightState);
   sample.pyro = pyroLatched ? 1u : 0u;
+  sample.baroRejected = baroSampleRejected ? 1u : 0u;
 }
 
 void ensureLogsDirectory() {
@@ -1200,7 +1348,10 @@ void ensureLogsDirectory() {
   FatFS.mkdir("/logs");
 }
 
-uint32_t countAndCleanFlightLogs() {
+// Scans /logs for Flight_NNNNNNNN.csv files. Read-only: other files in /logs belong to the
+// user and are never deleted.
+uint32_t scanFlightLogs(uint32_t &flightLogCount) {
+  flightLogCount = 0;
   if (!storageReady) {
     return 0;
   }
@@ -1210,33 +1361,25 @@ uint32_t countAndCleanFlightLogs() {
     return 0;
   }
 
-  uint32_t flightLogCount = 0;
   uint32_t highestFlightNumber = 0;
   File entry = logsDirectory.openNextFile();
   while (entry) {
-    String entryName = entry.name();
-    bool validFlightLog = entryName.length() == 19 &&
-                          entryName.startsWith("Flight_") &&
-                          entryName.endsWith(".csv");
-    if (validFlightLog) {
-      for (size_t i = 7; i < 15; i++) {
-        if (!isDigit(entryName[i])) {
-          validFlightLog = false;
-          break;
-        }
-      }
+    const char *entryName = entry.name();
+    bool validFlightLog = !entry.isDirectory() && strlen(entryName) == 19 &&
+                          strncmp(entryName, "Flight_", 7) == 0 &&
+                          strcmp(entryName + 15, ".csv") == 0;
+    for (size_t i = 7; validFlightLog && i < 15; i++) {
+      validFlightLog = isdigit(static_cast<unsigned char>(entryName[i])) != 0;
     }
 
     if (validFlightLog) {
       char numberBuffer[9] = {0};
-      strncpy(numberBuffer, entryName.c_str() + 7, 8);
+      memcpy(numberBuffer, entryName + 7, 8);
       uint32_t flightNumber = static_cast<uint32_t>(strtoul(numberBuffer, nullptr, 10));
       if (flightNumber > highestFlightNumber) {
         highestFlightNumber = flightNumber;
       }
       flightLogCount++;
-    } else {
-      FatFS.remove(entryName.c_str());
     }
 
     entry.close();
@@ -1244,10 +1387,6 @@ uint32_t countAndCleanFlightLogs() {
   }
 
   logsDirectory.close();
-  if (flightLogCount == 0) {
-    return 0;
-  }
-
   return highestFlightNumber;
 }
 
@@ -1354,8 +1493,14 @@ void enterFlightModeFromUsb() {
 
   tud_disconnect();
 
+  // Logs may have been added or removed over USB; pick the flight number now, on the ground.
+  if (storageReady) {
+    prepareNextFlightNumber();
+  }
+
   setFlightState(FlightState::Calibrating);
   if (calibratePadOrientation()) {
+    resetAltitudeEstimator();
     setFlightState(FlightState::Idle);
   } else {
     boardHealth.critical = true;
@@ -1369,7 +1514,7 @@ void handleSerialCommand(const char *command) {
     return;
   }
 
-  if (pyroTestPendingConfirm && millis() > pyroTestConfirmUntilMs) {
+  if (pyroTestPendingConfirm && static_cast<int32_t>(millis() - pyroTestConfirmUntilMs) > 0) {
     pyroTestPendingConfirm = false;
   }
 
@@ -1385,23 +1530,16 @@ void handleSerialCommand(const char *command) {
   upperCommand[len] = '\0';
 
   if (strcmp(upperCommand, "PYROTEST") == 0) {
-    bool inFlightState =
-      flightState == FlightState::Idle ||
-      flightState == FlightState::Armed ||
-      flightState == FlightState::Boost ||
-      flightState == FlightState::Coast ||
-      flightState == FlightState::PyroFired ||
-      flightState == FlightState::Landed;
-
-    if (pyroLatched) {
+    // Ground igniter test only: never in USB storage mode and never once a flight started.
+    if (flightState != FlightState::Idle || missionStarted) {
       pyroTestPendingConfirm = false;
-      Serial.println("[PYROTEST] Ignored: pyro has already fired.");
+      Serial.printf("[PYROTEST] Blocked: only allowed in idle on the ground (state=%s).\n", stateText(flightState));
       return;
     }
 
-    if (!inFlightState) {
+    if (digitalRead(PIN_PYRO) == HIGH) {
       pyroTestPendingConfirm = false;
-      Serial.println("[PYROTEST] Blocked: command requires flight mode (not USB storage mode).");
+      Serial.println("[PYROTEST] Ignored: pyro output is already active.");
       return;
     }
 
@@ -1413,8 +1551,10 @@ void handleSerialCommand(const char *command) {
     }
 
     pyroTestPendingConfirm = false;
-    Serial.println("[PYROTEST] WARNING: Igniting pyro output now.");
-    firePyro();
+    firePyroTestPulse();
+    if (digitalRead(PIN_PYRO) == HIGH) {
+      Serial.println("[PYROTEST] WARNING: Pyro output is now active for 1 s.");
+    }
     return;
   }
 
@@ -1453,117 +1593,232 @@ void handleSerialCommand(const char *command) {
   }
 }
 
-void flushMissionLogToFlash() {
-  if (!storageReady || missionLogFlushed || missionLogCount == 0) {
-    return;
+void resetMissionLogWriter() {
+  logSummary = MissionLogSummary();
+  missionLogStreaming = false;
+  missionLogRowsWritten = 0;
+  missionLogRowsDropped = 0;
+  missionLogRamDropped = 0;
+  missionLogOpenAttempts = 0;
+}
+
+// Bytes still free on the filesystem, minus a reserve so Settings.ini can always be rewritten.
+uint64_t logStorageAvailableBytes() {
+  FSInfo info = {};
+  if (!storageReady || !FatFS.info(info) || info.totalBytes <= info.usedBytes) {
+    return 0;
   }
+  uint64_t freeBytes = info.totalBytes - info.usedBytes;
+  return (freeBytes > LOG_STORAGE_RESERVE_BYTES) ? (freeBytes - LOG_STORAGE_RESERVE_BYTES) : 0;
+}
 
-  float maxAltitudeM = 0.0f;
-  float maxSpeedMps = 0.0f;
-  float maxAccelG = 0.0f;
-  float maxBatteryVoltageV = 0.0f;
-  float maxBatteryVoltageSeenV = 0.0f;
-  for (uint16_t i = 0; i < missionLogCount; i++) {
-    const FlightSample &sample = missionLog[i];
+void accumulateLogSummary(MissionLogSummary &summary, const FlightSample &sample) {
+  float altitudeM = sample.altitudeCm / 100.0f;
+  summary.maxAltitudeM = fmaxf(summary.maxAltitudeM, altitudeM);
+  summary.maxSpeedMps = fmaxf(summary.maxSpeedMps, fabsf(sample.velocityCms / 100.0f));
+  float axG = sample.axMg / 1000.0f;
+  float ayG = sample.ayMg / 1000.0f;
+  float azG = sample.azMg / 1000.0f;
+  summary.maxAccelG = fmaxf(summary.maxAccelG, sqrtf((axG * axG) + (ayG * ayG) + (azG * azG)));
+  summary.maxBatteryV = fmaxf(summary.maxBatteryV, sample.batteryVoltageMv / 1000.0f);
+  summary.lastAltitudeM = altitudeM;
+}
 
-    float altitudeM = sample.altitudeCm / 100.0f;
-    if (altitudeM > maxAltitudeM) {
-      maxAltitudeM = altitudeM;
-    }
-
-    float velocityMps = fabsf(sample.velocityCms / 100.0f);
-    if (velocityMps > maxSpeedMps) {
-      maxSpeedMps = velocityMps;
-    }
-
-    float axG = sample.axMg / 1000.0f;
-    float ayG = sample.ayMg / 1000.0f;
-    float azG = sample.azMg / 1000.0f;
-    float accelMagG = sqrtf((axG * axG) + (ayG * ayG) + (azG * azG));
-    if (accelMagG > maxAccelG) {
-      maxAccelG = accelMagG;
-    }
-
-    float batteryVoltageV = sample.batteryVoltageMv / 1000.0f;
-    if (batteryVoltageV > maxBatteryVoltageSeenV) {
-      maxBatteryVoltageSeenV = batteryVoltageV;
-    }
+// Writes one CSV row (same columns and formatting as before). Returns the bytes written,
+// 0 when the filesystem refused the write.
+size_t writeLogRow(File &logFile, const FlightSample &sample, float peakSoFarM) {
+  float altitudeM = sample.altitudeCm / 100.0f;
+  float actualApogeeDropM = fmaxf(0.0f, peakSoFarM - altitudeM);
+  char row[LOG_ROW_MAX_BYTES];
+  int length = snprintf(row, sizeof(row),
+    "%lu;%lu;%s;%s;%u;%.3f;%.3f;%.3f;%.2f;%.2f;%.2f;%.1f;%.2f;%.2f;%.2f;%.2f;%.1f;%.1f;%.2f;%.2f;%.2f;%u;%u\n",
+    static_cast<unsigned long>(sample.counter),
+    static_cast<unsigned long>(sample.ms),
+    stateText(static_cast<FlightState>(sample.state)),
+    powerModeText(powerMode),
+    static_cast<unsigned>(sample.pyro),
+    sample.axMg / 1000.0f, sample.ayMg / 1000.0f, sample.azMg / 1000.0f,
+    sample.gxDps10 / 10.0f, sample.gyDps10 / 10.0f, sample.gzDps10 / 10.0f,
+    sample.tempCd10 / 10.0f,
+    sample.pressureHd10 / 10.0f,
+    sample.batteryVoltageMv / 1000.0f,
+    altitudeM,
+    sample.velocityCms / 100.0f,
+    sample.rollD10 / 10.0f, sample.pitchD10 / 10.0f,
+    flightApogeeDropM,
+    actualApogeeDropM,
+    actualApogeeDropM - flightApogeeDropM,
+    static_cast<unsigned>(sample.healthBits),
+    static_cast<unsigned>(sample.baroRejected));
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(row)) {
+    return 0;
   }
+  size_t size = static_cast<size_t>(length);
+  return (logFile.write(reinterpret_cast<const uint8_t *>(row), size) == size) ? size : 0;
+}
 
-  maxBatteryVoltageV = maxBatteryVoltageSeenV;
-  peakAltitude = maxAltitudeM;
-  peakFlightSpeedMps = maxSpeedMps;
-  peakAccelMagG = maxAccelG;
-
-  ensureLogsDirectory();
-  File logFile = FatFS.open(missionLogPath, "w");
-  if (!logFile) {
-    boardHealth.warning = true;
-    return;
+void writeLogSummaryLines(File &logFile, const char *prefix, const MissionLogSummary &summary) {
+  logFile.printf("# %sMAX_ALTITUDE_M=%.2f\n", prefix, summary.maxAltitudeM);
+  logFile.printf("# %sMAX_SPEED_MPS=%.2f\n", prefix, summary.maxSpeedMps);
+  logFile.printf("# %sMAX_ACCEL_G=%.2f\n", prefix, summary.maxAccelG);
+  logFile.printf("# %sMAX_BATTERY_V=%.2f\n", prefix, summary.maxBatteryV);
+  logFile.printf("# %sESTIMATED_APOGEE_DROP_M=%.2f\n", prefix, flightApogeeDropM);
+  float actualDropM = fmaxf(0.0f, summary.maxAltitudeM - summary.lastAltitudeM);
+  logFile.printf("# %sACTUAL_APOGEE_DROP_M=%.2f\n", prefix, actualDropM);
+  logFile.printf("# %sAPOGEE_DROP_ERROR_M=%.2f\n", prefix, actualDropM - flightApogeeDropM);
+  if (apogeeDetected) {
+    logFile.printf("# %sDETECTED_APOGEE_M=%.2f\n", prefix, detectedApogeeAltitudeM);
+    logFile.printf("# %sDETECTED_APOGEE_MS=%lu\n", prefix, static_cast<unsigned long>(detectedApogeeMs));
+  } else {
+    logFile.printf("# %sDETECTED_APOGEE_M=none\n", prefix);
+    logFile.printf("# %sDETECTED_APOGEE_MS=none\n", prefix);
   }
+  logFile.printf("# %sAPOGEE_TRIGGER=%s\n", prefix, apogeeTrigger);
+  logFile.printf("# %sLAUNCH_ALTITUDE_M=%.2f\n", prefix, launchAltitudeM);
+  logFile.printf("# %sMIN_PYRO_FIRE_HEIGHT_M=%.1f\n", prefix, flightMinPyroFireHeightM);
+  const char *pyroReason = pyroBlockedReason;
+  if (!apogeeDetected && !pyroLatched) {
+    pyroReason = pyroFireAtApogeeAllowed ? "no_apogee" : "disabled";
+  }
+  logFile.printf("# %sPYRO_BLOCKED_REASON=%s\n", prefix, pyroReason);
+  logFile.printf("# %sSAMPLE_GAPS=%lu\n", prefix, static_cast<unsigned long>(sampleGaps));
+  logFile.printf("# %sLANDING_TRIGGER=%s\n", prefix, landingTrigger);
+  logFile.printf("# %sBARO_REJECTED_SAMPLES=%lu\n", prefix, static_cast<unsigned long>(baroRejectedSamples));
+  logFile.printf("# %sPYRO_AT_APOGEE_ENABLED=%s\n", prefix, pyroFireAtApogeeAllowed ? "TRUE" : "FALSE");
+  logFile.printf("# %sRAM_DROPPED_SAMPLES=%lu\n", prefix, static_cast<unsigned long>(missionLogRamDropped));
+}
 
+void writeLogHeader(File &logFile, bool summaryIsFinal, const MissionLogSummary &summary) {
   logFile.println("# AstroNav Nano Flight Log");
   logFile.printf("# Flight Number: %lu\n", static_cast<unsigned long>(currentFlightNumber));
   logFile.printf("# Boot Time Ms: %lu\n", static_cast<unsigned long>(bootMs));
-  logFile.printf("# Samples: %u\n", missionLogCount);
-  logFile.printf("# MAX_ALTITUDE_M=%.2f\n", maxAltitudeM);
-  logFile.printf("# MAX_SPEED_MPS=%.2f\n", maxSpeedMps);
-  logFile.printf("# MAX_ACCEL_G=%.2f\n", maxAccelG);
-  logFile.printf("# MAX_BATTERY_V=%.2f\n", maxBatteryVoltageV);
-  logFile.printf("# ESTIMATED_APOGEE_DROP_M=%.2f\n", flightApogeeDropM);
-  logFile.printf("# ACTUAL_APOGEE_DROP_M=%.2f\n", fmaxf(0.0f, maxAltitudeM - currentAltitude));
-  logFile.printf("# APOGEE_DROP_ERROR_M=%.2f\n", fmaxf(0.0f, maxAltitudeM - currentAltitude) - flightApogeeDropM);
-  //logFile.println("# Columns: counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;battery_v;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
-  logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;battery_v;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
+  if (summaryIsFinal) {
+    logFile.printf("# Samples: %u\n", missionLogCount);
+  } else {
+    logFile.println("# Samples: long flight, see the FINAL_ lines at the end of this file");
+  }
+  writeLogSummaryLines(logFile, "", summary);
+  logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;battery_v;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits;baro_rejected");
+}
+
+MissionLogSummary previewLogSummary() {
+  MissionLogSummary preview = logSummary;
   for (uint16_t i = 0; i < missionLogCount; i++) {
+    accumulateLogSummary(preview, missionLog[i]);
+  }
+  return preview;
+}
+
+// Moves the oldest `count` RAM samples to the file (as far as storage allows) and removes them
+// from RAM. logSummary always includes every sample, also the ones that did not fit on flash.
+void writeOldestLogRows(File &logFile, uint16_t count) {
+  uint64_t availableBytes = logStorageAvailableBytes();
+  for (uint16_t i = 0; i < count; i++) {
     const FlightSample &sample = missionLog[i];
-    logFile.print(static_cast<unsigned long>(sample.counter));
-    logFile.print(';');
-    logFile.print(static_cast<unsigned long>(sample.ms));
-    logFile.print(';');
-    logFile.print(stateText(static_cast<FlightState>(sample.state)));
-    logFile.print(';');
-    logFile.print(powerModeText(powerMode));
-    logFile.print(';');
-    logFile.print(static_cast<unsigned>(sample.pyro));
-    logFile.print(';');
-    logFile.print(sample.axMg / 1000.0f, 3);
-    logFile.print(';');
-    logFile.print(sample.ayMg / 1000.0f, 3);
-    logFile.print(';');
-    logFile.print(sample.azMg / 1000.0f, 3);
-    logFile.print(';');
-    logFile.print(sample.gxDps10 / 10.0f, 2);
-    logFile.print(';');
-    logFile.print(sample.gyDps10 / 10.0f, 2);
-    logFile.print(';');
-    logFile.print(sample.gzDps10 / 10.0f, 2);
-    logFile.print(';');
-    logFile.print(sample.tempCd10 / 10.0f, 1);
-    logFile.print(';');
-    logFile.print(sample.pressureHd10 / 10.0f, 2);
-    logFile.print(';');
-    logFile.print(sample.batteryVoltageMv / 1000.0f, 2);
-    logFile.print(';');
-    logFile.print(sample.altitudeCm / 100.0f, 2);
-    logFile.print(';');
-    logFile.print(sample.velocityCms / 100.0f, 2);
-    logFile.print(';');
-    logFile.print(sample.rollD10 / 10.0f, 1);
-    logFile.print(';');
-    logFile.print(sample.pitchD10 / 10.0f, 1);
-    logFile.print(';');
-    logFile.print(sample.estimatedApogeeDropCm / 100.0f, 2);
-    logFile.print(';');
-    logFile.print(sample.actualApogeeDropCm / 100.0f, 2);
-    logFile.print(';');
-    logFile.print(sample.apogeeDropErrorCm / 100.0f, 2);
-    logFile.print(';');
-    logFile.println(static_cast<unsigned>(sample.healthBits));
+    accumulateLogSummary(logSummary, sample);
+    size_t written = 0;
+    if (availableBytes >= LOG_ROW_MAX_BYTES) {
+      written = writeLogRow(logFile, sample, logSummary.maxAltitudeM);
+      availableBytes -= written;
+    }
+    if (written > 0) {
+      missionLogRowsWritten++;
+    } else {
+      missionLogRowsDropped++;
+    }
+  }
+  if (count < missionLogCount) {
+    memmove(&missionLog[0], &missionLog[count], sizeof(FlightSample) * (missionLogCount - count));
+  }
+  missionLogCount = static_cast<uint16_t>(missionLogCount - count);
+}
+
+bool openMissionLogFile(File &logFile, const char *mode) {
+  ensureLogsDirectory();
+  logFile = FatFS.open(missionLogPath, mode);
+  if (!logFile) {
+    boardHealth.warning = true;
+    missionLogOpenAttempts++;
+    lastLogStatus = "open_failed";
+    return false;
+  }
+  return true;
+}
+
+// Long flights only: once the pyro decision is final and the RAM buffer is mostly full, the
+// oldest samples move to flash in small batches so the descent is logged until landing.
+// Normal flights never reach this threshold and write nothing to flash before landing.
+void streamMissionLogIfNeeded() {
+  if (!storageReady || missionLogFlushed || !missionStarted || flightState != FlightState::Descent ||
+      missionLogCount < LOG_STREAM_START_SAMPLES || missionLogOpenAttempts >= LOG_MAX_OPEN_ATTEMPTS) {
+    return;
+  }
+  bool pyroDecisionFinal = pyroLatched || !pyroFireAtApogeeAllowed ||
+                           static_cast<int32_t>(millis() - pyroRetryUntilMs) >= 0;
+  if (!pyroDecisionFinal) {
+    return;
+  }
+
+  File logFile;
+  if (!missionLogStreaming) {
+    if (!openMissionLogFile(logFile, "w")) {
+      return;
+    }
+    // Summary so far; the complete values follow as FINAL_ lines when the flight ends.
+    writeLogHeader(logFile, false, previewLogSummary());
+    missionLogStreaming = true;
+  } else if (!openMissionLogFile(logFile, "a")) {
+    return;
+  }
+
+  uint16_t batch = (missionLogCount < LOG_STREAM_BATCH_SAMPLES) ? missionLogCount : LOG_STREAM_BATCH_SAMPLES;
+  writeOldestLogRows(logFile, batch);
+  logFile.close();
+}
+
+void flushMissionLogToFlash() {
+  if (!storageReady || missionLogFlushed || missionLogOpenAttempts >= LOG_MAX_OPEN_ATTEMPTS) {
+    return;
+  }
+  if (!missionLogStreaming && missionLogCount == 0) {
+    return;
+  }
+
+  File logFile;
+  if (missionLogStreaming) {
+    if (!openMissionLogFile(logFile, "a")) {
+      return;
+    }
+    writeOldestLogRows(logFile, missionLogCount);
+    logFile.println("# --- final summary (flight longer than the RAM buffer) ---");
+    logFile.printf("# FINAL_SAMPLES=%lu\n", static_cast<unsigned long>(missionLogRowsWritten + missionLogRowsDropped));
+    logFile.printf("# FINAL_STORAGE_DROPPED_SAMPLES=%lu\n", static_cast<unsigned long>(missionLogRowsDropped));
+    writeLogSummaryLines(logFile, "FINAL_", logSummary);
+  } else {
+    // Normal flight: summary first, then all rows, same layout as before.
+    if (!openMissionLogFile(logFile, "w")) {
+      return;
+    }
+    writeLogHeader(logFile, true, previewLogSummary());
+    writeOldestLogRows(logFile, missionLogCount);
+    if (missionLogRowsDropped > 0) {
+      logFile.printf("# STORAGE_FULL: %lu samples could not be saved\n", static_cast<unsigned long>(missionLogRowsDropped));
+    }
   }
 
   logFile.flush();
   logFile.close();
+
+  peakAltitude = logSummary.maxAltitudeM;
+  peakFlightSpeedMps = logSummary.maxSpeedMps;
+  peakAccelMagG = logSummary.maxAccelG;
+  if (missionLogRowsDropped > 0) {
+    lastLogStatus = "truncated_storage_full";
+    boardHealth.warning = true;
+    Serial.printf("[LOG] Storage full: %lu samples not saved.\n", static_cast<unsigned long>(missionLogRowsDropped));
+  } else {
+    lastLogStatus = "ok";
+  }
   missionLogFlushed = true;
 }
 
@@ -1663,7 +1918,7 @@ void updateStatusLed() {
     case FlightState::Coast:
       setLedProfile(LedProfile::Coast);
       break;
-    case FlightState::PyroFired:
+    case FlightState::Descent:
       setLedProfile(LedProfile::Warning);
       break;
     case FlightState::Landed:
@@ -1703,23 +1958,143 @@ bool missionAtSafeGroundState() {
   return flightState == FlightState::Landed || flightState == FlightState::Fault;
 }
 
+float historySpan(const float *history, uint8_t count) {
+  if (count == 0) {
+    return 0.0f;
+  }
+  float lowest = history[0];
+  float highest = history[0];
+  for (uint8_t i = 1; i < count; i++) {
+    lowest = fminf(lowest, history[i]);
+    highest = fmaxf(highest, history[i]);
+  }
+  return highest - lowest;
+}
+
+float altitudeSamplesAgo(uint8_t samplesAgo) {
+  uint8_t index = static_cast<uint8_t>((altitudeHistoryIndex + SENSOR_HISTORY_SAMPLES - 1 - samplesAgo) % SENSOR_HISTORY_SAMPLES);
+  return altitudeHistory[index];
+}
+
+uint8_t baroSamplesSinceAccepted = 0;
+float anchorVerticalVelocity = 0.0f;
+
+void resetAltitudeEstimator() {
+  memset(altitudeHistory, 0, sizeof(altitudeHistory));
+  memset(accelMagHistory, 0, sizeof(accelMagHistory));
+  altitudeHistoryIndex = 0;
+  altitudeHistoryCount = 0;
+  accelHistoryIndex = 0;
+  accelHistoryCount = 0;
+  lastAcceptedRawAltitude = 0.0f;
+  baroConsecutiveRejects = 0;
+  baroSamplesSinceAccepted = 0;
+  anchorVerticalVelocity = 0.0f;
+  baroSampleRejected = false;
+  filteredAltitude = 0.0f;
+  currentAltitude = 0.0f;
+  currentVerticalVelocity = 0.0f;
+}
+
+// Turns raw pressure into altitude and vertical speed with as little lag as possible:
+// physically impossible jumps are rejected first, so only light smoothing is needed.
+void updateAltitudeEstimate() {
+  const float dt = SAMPLE_PERIOD_MS / 1000.0f;
+  baroSampleRejected = false;
+  if (baroSamplesSinceAccepted < 255) {
+    baroSamplesSinceAccepted++;
+  }
+
+  // Extrapolate with the velocity frozen at the last accepted sample: the live velocity is
+  // computed from these predictions and would otherwise feed back and run away.
+  uint8_t extrapolationSamples = (baroSamplesSinceAccepted < BARO_MAX_EXTRAPOLATION_SAMPLES)
+    ? baroSamplesSinceAccepted
+    : BARO_MAX_EXTRAPOLATION_SAMPLES;
+  float predicted = lastAcceptedRawAltitude + anchorVerticalVelocity * dt * extrapolationSamples;
+  float rawAltitude = predicted;
+  float measured = (baroSampleFresh && currentPressure > 0.0f) ? altitudeFromPressure(currentPressure) : NAN;
+
+  if (isfinite(measured)) {
+    float allowed = flightMaxPlausibleSpeedMps * dt * baroSamplesSinceAccepted + BARO_SPIKE_NOISE_MARGIN_M;
+    bool plausible = fabsf(measured - predicted) <= allowed;
+    if (plausible || baroConsecutiveRejects >= BARO_SPIKE_MAX_CONSECUTIVE_REJECTS) {
+      if (!plausible) {
+        // The jump persisted, so it is real (or our estimate was off): re-anchor on it and
+        // shift the history so the velocity slope does not see an artificial step.
+        float offset = measured - filteredAltitude;
+        for (uint8_t i = 0; i < altitudeHistoryCount; i++) {
+          altitudeHistory[i] += offset;
+        }
+        filteredAltitude = measured;
+      }
+      rawAltitude = measured;
+      lastAcceptedRawAltitude = measured;
+      baroConsecutiveRejects = 0;
+      baroSamplesSinceAccepted = 0;
+    } else {
+      baroConsecutiveRejects++;
+      baroSampleRejected = true;
+      if (missionStarted) {
+        baroRejectedSamples++;
+      }
+    }
+  }
+
+  filteredAltitude += ALTITUDE_FILTER_ALPHA * (rawAltitude - filteredAltitude);
+  currentAltitude = filteredAltitude;
+
+  altitudeHistory[altitudeHistoryIndex] = currentAltitude;
+  altitudeHistoryIndex = static_cast<uint8_t>((altitudeHistoryIndex + 1) % SENSOR_HISTORY_SAMPLES);
+  if (altitudeHistoryCount < SENSOR_HISTORY_SAMPLES) {
+    altitudeHistoryCount++;
+  }
+
+  uint8_t window = (altitudeHistoryCount - 1 < VELOCITY_WINDOW_SAMPLES)
+    ? static_cast<uint8_t>(altitudeHistoryCount - 1)
+    : VELOCITY_WINDOW_SAMPLES;
+  currentVerticalVelocity = (window == 0)
+    ? 0.0f
+    : (currentAltitude - altitudeSamplesAgo(window)) / (window * dt);
+  if (baroSamplesSinceAccepted == 0) {
+    anchorVerticalVelocity = currentVerticalVelocity;
+  }
+}
+
+// Apogee pyro with software safety gates. PYROTEST uses firePyro() directly.
+void tryApogeePyro(bool baroReliable) {
+  if (pyroLatched) {
+    return;
+  }
+  if (!pyroFireAtApogeeAllowed) {
+    pyroBlockedReason = "disabled";
+    return;
+  }
+  // Parachute timing depends on the barometer: never fire on a stale or rejected reading.
+  if (!baroReliable || baroSampleRejected || baroSamplesSinceAccepted != 0) {
+    pyroBlockedReason = "baro_unreliable";
+    return;
+  }
+  // Protects people handling an armed board: below this height the pyro never fires.
+  if (peakAltitude - launchAltitudeM < flightMinPyroFireHeightM) {
+    pyroBlockedReason = "below_min_height";
+    return;
+  }
+  pyroBlockedReason = "none";
+  firePyro();
+}
+
 void updateFlightStateFromSamples() {
   float accelMag = magnitude3(currentAx, currentAy, currentAz);
   float gravityProjection = (currentAx * gravityAxisX) + (currentAy * gravityAxisY) + (currentAz * gravityAxisZ);
   currentRollDeg = atan2f(currentAy, currentAz) * 57.2957795f;
   currentPitchDeg = atan2f(-currentAx, sqrtf((currentAy * currentAy) + (currentAz * currentAz))) * 57.2957795f;
 
-  if (currentPressure > 0.0f) {
-    filteredPressure = (filteredPressure * 0.80f) + (currentPressure * 0.20f);
-  }
   if (currentTemperature > -100.0f) {
     filteredTemperature = (filteredTemperature * 0.80f) + (currentTemperature * 0.20f);
   }
 
-  currentAltitude = altitudeFromPressure(filteredPressure);
-  filteredAltitude = (filteredAltitude * 0.80f) + (currentAltitude * 0.20f);
-  currentAltitude = filteredAltitude;
-  if (flightState == FlightState::Boost || flightState == FlightState::Coast) {
+  updateAltitudeEstimate();
+  if ((flightState == FlightState::Boost || flightState == FlightState::Coast) && !baroSampleRejected) {
     if (currentAltitude > peakAltitude) {
       peakAltitude = currentAltitude;
       apogeePeakHoldCount = 0;
@@ -1727,7 +2102,8 @@ void updateFlightStateFromSamples() {
     } else {
       uint32_t holdDeltaMs = millis() - apogeePeakHoldStartMs;
       if (holdDeltaMs <= APOGEE_FIRE_MAX_MS) {
-        if (currentAltitude >= peakAltitude - 0.02f && fabsf(currentVerticalVelocity) <= 0.50f) {
+        if (currentAltitude >= peakAltitude - APOGEE_PEAK_HOLD_BAND_M &&
+            fabsf(currentVerticalVelocity) <= APOGEE_PEAK_HOLD_MAX_SPEED_MPS) {
           if (apogeePeakHoldCount < 255) {
             apogeePeakHoldCount++;
           }
@@ -1742,9 +2118,6 @@ void updateFlightStateFromSamples() {
     }
   }
 
-  float rawVelocity = (currentAltitude - lastAltitudeForVelocity) / (SAMPLE_PERIOD_MS / 1000.0f);
-  currentVerticalVelocity = (currentVerticalVelocity * 0.75f) + (rawVelocity * 0.25f);
-  lastAltitudeForVelocity = currentAltitude;
   if (missionStarted) {
     float verticalSpeedAbs = fabsf(currentVerticalVelocity);
     if (verticalSpeedAbs > peakFlightSpeedMps) {
@@ -1756,8 +2129,14 @@ void updateFlightStateFromSamples() {
   if (imuReliable && accelMag > peakAccelMagG) {
     peakAccelMagG = accelMag;
   }
+  if (imuReliable) {
+    accelMagHistory[accelHistoryIndex] = accelMag;
+    accelHistoryIndex = static_cast<uint8_t>((accelHistoryIndex + 1) % SENSOR_HISTORY_SAMPLES);
+    if (accelHistoryCount < SENSOR_HISTORY_SAMPLES) {
+      accelHistoryCount++;
+    }
+  }
   bool baroReliable = boardHealth.baroOk && isfinite(currentAltitude) && isfinite(currentVerticalVelocity);
-  bool flightFallbackAllowed = (flightState == FlightState::Boost || flightState == FlightState::Coast || flightState == FlightState::PyroFired);
 
   if (flightState == FlightState::Idle) {
     bool launchDetected = false;
@@ -1778,6 +2157,7 @@ void updateFlightStateFromSamples() {
     if (launchConfirmCount >= LAUNCH_CONFIRM_SAMPLES) {
       launchMs = millis();
       launchConfirmCount = 0;
+      launchAltitudeM = currentAltitude;
       peakAltitude = currentAltitude;
       apogeePeakHoldCount = 0;
       apogeePeakHoldStartMs = millis();
@@ -1809,24 +2189,22 @@ void updateFlightStateFromSamples() {
       }
     }
 
-    bool apogeeCandidate = false;
-    if (baroReliable) {
-      float altitudeDropFromPeakM = peakAltitude - currentAltitude;
-      bool actualPeakDescent = altitudeDropFromPeakM >= 0.05f && currentVerticalVelocity <= 0.0f;
-      bool nearEstimatedThreshold = altitudeDropFromPeakM >= flightApogeeDropM;
-      bool descentConfidence = actualPeakDescent &&
-                               ((nearEstimatedThreshold && currentVerticalVelocity <= flightApogeeVelocityThresholdMPS) ||
-                                currentVerticalVelocity <= 0.0f);
-      apogeeCandidate = descentConfidence &&
-                       (imuReliable ? (accelMag <= APOGEE_ACCEL_MAX_G) : true) &&
-                       (millis() - launchMs) >= LAUNCH_MIN_TIME_MS;
-    } else if (imuReliable && flightFallbackAllowed) {
-      apogeeCandidate = (accelMag <= APOGEE_ACCEL_MAX_G) &&
-                       currentVerticalVelocity <= 0.0f &&
-                       (millis() - launchMs) >= LAUNCH_MIN_TIME_MS;
-    }
+    // Apogee needs a trustworthy barometer. Without it no apogee is declared, so the
+    // pyro cannot fire on a guess; landing detection still saves the log.
+    bool pastMinFlightTime = (millis() - launchMs) >= LAUNCH_MIN_TIME_MS;
+    float altitudeDropFromPeakM = peakAltitude - currentAltitude;
+    bool fallingFree = imuReliable
+      ? (accelMag <= APOGEE_ACCEL_MAX_G)
+      : (currentVerticalVelocity <= APOGEE_BARO_ONLY_DESCENT_MPS);
+    bool apogeeGate = baroReliable && !baroSampleRejected && pastMinFlightTime && fallingFree;
 
-    if (apogeeCandidate) {
+    // Primary: climb has stopped. Backup: the drop from the peak is already clearly
+    // larger than noise, in case the velocity estimate lags or is noisy.
+    bool velocityApogee = apogeeGate && currentVerticalVelocity <= 0.0f &&
+                          altitudeDropFromPeakM >= APOGEE_MIN_DROP_M;
+    bool dropApogee = apogeeGate && altitudeDropFromPeakM >= flightApogeeDropM;
+
+    if (velocityApogee || dropApogee) {
       if (apogeeConfirmCount < 255) {
         apogeeConfirmCount++;
       }
@@ -1834,40 +2212,80 @@ void updateFlightStateFromSamples() {
       apogeeConfirmCount = 0;
     }
 
-    bool peakHoldFire = apogeePeakHoldCount >= APOGEE_HOLD_SAMPLES &&
+    // The estimate only speeds up confirmation near the expected apogee; it never blocks it.
+    float peakAboveLaunchM = peakAltitude - launchAltitudeM;
+    bool nearExpectedApogee = peakAboveLaunchM >= flightExpectedApogeeLowM &&
+                              peakAboveLaunchM <= flightExpectedApogeeHighM;
+    uint8_t requiredApogeeSamples = nearExpectedApogee ? APOGEE_CONFIRM_SAMPLES_NEAR_EXPECTED : APOGEE_CONFIRM_SAMPLES;
+
+    bool peakHoldFire = baroReliable && pastMinFlightTime &&
+                        (!imuReliable || accelMag <= APOGEE_ACCEL_MAX_G) &&
+                        apogeePeakHoldCount >= APOGEE_HOLD_SAMPLES &&
                         (millis() - apogeePeakHoldStartMs) <= APOGEE_FIRE_MAX_MS;
 
-    if (apogeeConfirmCount >= APOGEE_CONFIRM_SAMPLES) {
-      firePyro();
+    if (apogeeConfirmCount >= requiredApogeeSamples || peakHoldFire) {
+      apogeeDetected = true;
+      detectedApogeeAltitudeM = peakAltitude;
+      detectedApogeeMs = millis() - bootMs;
+      if (apogeeConfirmCount >= requiredApogeeSamples) {
+        apogeeTrigger = velocityApogee ? "velocity" : "drop";
+      } else {
+        apogeeTrigger = "peak_hold";
+      }
+      setFlightState(FlightState::Descent);
+      pyroRetryUntilMs = millis() + PYRO_RETRY_WINDOW_MS;
+      tryApogeePyro(baroReliable);
       apogeeConfirmCount = 0;
-      apogeePeakHoldCount = 0;
-      apogeePeakHoldStartMs = 0;
-    } else if (peakHoldFire) {
-      firePyro();
       apogeePeakHoldCount = 0;
       apogeePeakHoldStartMs = 0;
     }
 
+  } else if (flightState == FlightState::Descent && !pyroLatched &&
+             static_cast<int32_t>(pyroRetryUntilMs - millis()) > 0) {
+    tryApogeePyro(baroReliable);
   }
 
   bool postLaunchState = flightState == FlightState::Boost ||
                          flightState == FlightState::Coast ||
-                         flightState == FlightState::PyroFired;
+                         flightState == FlightState::Descent;
   if (postLaunchState && missionStarted && !missionLogFlushed) {
+    // Resting on the ground reads ~1 g with a steady signal. Free fall reads ~0 g, and a
+    // steady descent also reads ~1 g, so the IMU alone can never prove a landing:
+    // the barometer must agree the altitude has stopped changing.
+    float gyroMag = magnitude3(currentGx - gyroBiasX, currentGy - gyroBiasY, currentGz - gyroBiasZ);
+    float accelSpan = historySpan(accelMagHistory, accelHistoryCount);
+    float altitudeSpan = historySpan(altitudeHistory, altitudeHistoryCount);
+    bool accelWindowFull = accelHistoryCount >= SENSOR_HISTORY_SAMPLES;
+    bool altitudeWindowFull = altitudeHistoryCount >= SENSOR_HISTORY_SAMPLES;
+
+    bool imuCalm = imuReliable && accelWindowFull &&
+                   fabsf(accelMag - 1.0f) <= LANDING_IMU_CALM_ACCEL_G &&
+                   accelSpan <= LANDING_IMU_CALM_ACCEL_SPAN_G &&
+                   gyroMag <= LANDING_IMU_CALM_GYRO_DPS;
+    bool imuMinimal = imuReliable && accelWindowFull &&
+                      fabsf(accelMag - 1.0f) <= LANDING_IMU_MINIMAL_ACCEL_G &&
+                      accelSpan <= LANDING_IMU_MINIMAL_ACCEL_SPAN_G &&
+                      gyroMag <= LANDING_IMU_MINIMAL_GYRO_DPS;
+    bool baroCalm = baroReliable && altitudeWindowFull && altitudeSpan <= LANDING_BARO_CALM_SPAN_M;
+    bool baroMinimal = baroReliable && altitudeWindowFull && altitudeSpan <= LANDING_BARO_MINIMAL_SPAN_M;
+
     bool landingCandidate = false;
-    bool stationary = accelMag <= 1.15f &&
-                      magnitude3(currentGx - gyroBiasX,
-                                 currentGy - gyroBiasY,
-                                 currentGz - gyroBiasZ) <= STATIONARY_GYRO_TOLERANCE_DPS;
+    const char *candidateTrigger = "none";
+    uint8_t requiredLandingSamples = (flightState == FlightState::Descent)
+      ? LANDING_CONFIRM_SAMPLES
+      : LANDING_CONFIRM_SAMPLES_WITHOUT_APOGEE;
     if (baroReliable && imuReliable) {
-      landingCandidate = (fabsf(currentVerticalVelocity) <= flightLandingVelocityToleranceMPS &&
-                          stationary);
+      // One sensor fully calm, the other at most slightly moving (wind). Still swinging
+      // (e.g. hanging in a tree) keeps both above "minimal", so we wait until it settles.
+      landingCandidate = (imuCalm && baroMinimal) || (baroCalm && imuMinimal);
+      candidateTrigger = "imu_baro";
     } else if (baroReliable) {
-      landingCandidate = (fabsf(currentVerticalVelocity) <= flightLandingVelocityToleranceMPS &&
-                          (millis() - launchMs) > LAUNCH_MIN_TIME_MS);
+      landingCandidate = baroCalm;
+      candidateTrigger = "baro_only";
     } else if (imuReliable) {
-      landingCandidate = (stationary &&
-                          (millis() - launchMs) > LAUNCH_MIN_TIME_MS);
+      landingCandidate = imuCalm;
+      candidateTrigger = "imu_only";
+      requiredLandingSamples = LANDING_CONFIRM_SAMPLES_SINGLE_IMU;
     }
 
     if (landingCandidate) {
@@ -1878,8 +2296,24 @@ void updateFlightStateFromSamples() {
       landingConfirmCount = 0;
     }
 
-    if (landingConfirmCount >= LANDING_CONFIRM_SAMPLES) {
+    if (landingConfirmCount >= requiredLandingSamples) {
+      landingTrigger = candidateTrigger;
       setFlightState(FlightState::Landed);
+    } else {
+      // Last resort so the flight log is always saved, even if both sensors failed.
+      // Scales with the real peak, so a flight far above the estimate is not cut short,
+      // and waits while the barometer still clearly shows a descent.
+      uint32_t sinceLaunchMs = millis() - launchMs;
+      float heightForTimeoutM = fmaxf(flightExpectedApogeeHighM, peakAltitude - launchAltitudeM);
+      float timeoutS = heightForTimeoutM / LANDING_SLOWEST_DESCENT_MPS + 60.0f;
+      uint32_t timeoutMs = static_cast<uint32_t>(clampFloat(timeoutS * 1000.0f,
+                                                            static_cast<float>(LANDING_TIMEOUT_MIN_MS),
+                                                            static_cast<float>(LANDING_TIMEOUT_MAX_MS)));
+      bool stillDescending = baroReliable && altitudeWindowFull && altitudeSpan > LANDING_BARO_MINIMAL_SPAN_M;
+      if ((sinceLaunchMs >= timeoutMs && !stillDescending) || sinceLaunchMs >= LANDING_TIMEOUT_MAX_MS) {
+        landingTrigger = "timeout";
+        setFlightState(FlightState::Landed);
+      }
     }
   }
 }
@@ -1993,6 +2427,8 @@ void setup() {
     ensureDeviceSerial();
     Serial.println("[BOOT] stage=serial_complete");
     syncAssetsFromDeviceProfile();
+    // After the profile is loaded, so the scanned LOG_COUNT is not overwritten.
+    prepareNextFlightNumber();
     // Keep FLASH_STAMP aligned with the currently flashed firmware build.
     buildFlashStamp(deviceProfile.flashStamp, sizeof(deviceProfile.flashStamp));
     if (ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
@@ -2050,6 +2486,7 @@ void setup() {
       recordFaultAndSafeStop();
       setFlightState(FlightState::Fault);
     } else {
+      resetAltitudeEstimator();
       setFlightState(FlightState::Idle);
     }
   }
@@ -2093,8 +2530,17 @@ void loop() {
     setFlightState(FlightState::Fault);
   }
 
-  if (now >= nextSampleMs) {
-    nextSampleMs += SAMPLE_PERIOD_MS;
+  if (static_cast<int32_t>(now - nextSampleMs) >= 0) {
+    // After a stall, resume on schedule instead of replaying a burst of samples with
+    // the same timestamp (that would distort the fixed-interval velocity estimate).
+    if (now - nextSampleMs >= SAMPLE_PERIOD_MS) {
+      if (missionStarted) {
+        sampleGaps++;
+      }
+      nextSampleMs = now + SAMPLE_PERIOD_MS;
+    } else {
+      nextSampleMs += SAMPLE_PERIOD_MS;
+    }
 
     if (readInputVoltage(currentVinVoltage)) {
       powerMode = classifyPowerSource(currentVinVoltage);
@@ -2128,7 +2574,8 @@ void loop() {
 
     float temp = 0.0f;
     float pressure = 0.0f;
-    if (readBaroSample(temp, pressure)) {
+    baroSampleFresh = readBaroSample(temp, pressure);
+    if (baroSampleFresh) {
       currentTemperature = temp;
       currentPressure = pressure;
       recordSensorResult(true, boardHealth.baroOk, baroFailureCount, baroFailureWindowStartMs);
@@ -2143,6 +2590,7 @@ void loop() {
     if (missionStarted || flightState == FlightState::Idle) {
       appendMissionSample();
     }
+    streamMissionLogIfNeeded();
 
     if (missionAtSafeGroundState() && !missionLogFlushed) {
       flushMissionLogToFlash();

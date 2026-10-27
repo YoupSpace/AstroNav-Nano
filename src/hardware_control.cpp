@@ -4,56 +4,12 @@
 #include <SparkFun_BMP581_Arduino_Library.h>
 #include <cmath>
 
-enum class FlightState {
-  Booting,
-  Calibrating,
-  Idle,
-  UsbMode,
-  Armed,
-  Boost,
-  Coast,
-  PyroFired,
-  Landed,
-  Fault
-};
-
-extern Adafruit_NeoPixel led;
+// Defined in main.cpp.
 extern BMP581 baro;
 extern FlightState flightState;
-extern bool boardHealthCritical;
-extern bool boardHealthWarning;
-extern bool storageReady;
-extern bool usbDriveReady;
-extern bool usbFlightOverride;
-extern float peakAltitude;
-extern float lastAltitudeForVelocity;
-extern float flightLaunchThresholdG;
-extern float flightApogeeDropM;
-extern float flightApogeeVelocityThresholdMPS;
-extern float flightLandingAltitudeToleranceM;
-extern float flightLandingVelocityToleranceMPS;
-extern uint32_t launchMs;
-extern uint32_t lastLogMs;
-extern uint32_t nextSampleMs;
-extern uint8_t launchConfirmCount;
-extern uint8_t apogeeConfirmCount;
-extern uint8_t landingConfirmCount;
-extern void setLedProfile(int profile);
-extern void updateStatusLed();
-extern void enterFlightModeFromUsb();
-extern void onUsbStorageUnplug(uint32_t cbData);
-extern void ensureUsbInfoFiles();
-extern void persistDeviceProfile();
-extern void flushMissionLogToFlash();
-extern void startMissionLog();
-extern void appendMissionSample();
-extern void recordFaultAndSafeStop();
-extern bool pyroFireAtApogeeAllowed;
 extern bool missionStarted;
-extern float clampFloat(float value, float minimum, float maximum);
-extern float altitudeFromPressure(float pressureHpa);
-extern bool missionAtSafeGroundState();
-extern void firePyro();
+extern void updateStatusLed();
+extern void appendMissionSample();
 
 static constexpr float ACCEL_LSB_PER_G = 1024.0f;
 static constexpr float GYRO_LSB_PER_DPS = 16.4f;
@@ -235,10 +191,6 @@ bool configureImu() {
   return boardHealth.imuConfigOk;
 }
 
-static float magnitude3(float x, float y, float z) {
-  return sqrtf((x * x) + (y * y) + (z * z));
-}
-
 bool calibratePadOrientation() {
   uint32_t deadline = millis() + CALIBRATION_TIMEOUT_MS;
   uint8_t stableCount = 0;
@@ -314,7 +266,6 @@ bool calibratePadOrientation() {
         filteredAltitude = 0.0f;
         currentAltitude = 0.0f;
         currentVerticalVelocity = 0.0f;
-        lastAltitudeForVelocity = 0.0f;
         return true;
       }
     } else {
@@ -336,7 +287,8 @@ void firePyro() {
     return;
   }
 
-  if (!missionStarted || (flightState != FlightState::Boost && flightState != FlightState::Coast)) {
+  if (!missionStarted || (flightState != FlightState::Boost && flightState != FlightState::Coast &&
+                          flightState != FlightState::Descent)) {
     Serial.println("[PYRO] Blocked: confirmed liftoff and active flight phase required.");
     return;
   }
@@ -344,11 +296,23 @@ void firePyro() {
   pyroLatched = true;
   pyroPulseUntilMs = millis() + PYRO_PULSE_MS;
   digitalWrite(PIN_PYRO, HIGH);
-  setFlightState(FlightState::PyroFired);
+  appendMissionSample();
+}
+
+// Ground igniter test: same pulse as a real deployment, but it does not latch the flight
+// pyro, so the board can still deploy on the next flight after the igniter is replaced.
+// The caller (PYROTEST) only allows this in Idle before launch.
+void firePyroTestPulse() {
+  if (missionStarted || flightState != FlightState::Idle) {
+    Serial.println("[PYRO] Test blocked: only allowed on the ground in idle.");
+    return;
+  }
+  pyroPulseUntilMs = millis() + PYRO_PULSE_MS;
+  digitalWrite(PIN_PYRO, HIGH);
 }
 
 void updatePyroOutput() {
-  if (pyroLatched && digitalRead(PIN_PYRO) == HIGH && millis() >= pyroPulseUntilMs) {
+  if (digitalRead(PIN_PYRO) == HIGH && static_cast<int32_t>(millis() - pyroPulseUntilMs) >= 0) {
     digitalWrite(PIN_PYRO, LOW);
   }
 }

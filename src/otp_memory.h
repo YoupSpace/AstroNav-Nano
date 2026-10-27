@@ -26,6 +26,7 @@ struct AstroNavOtpStatus {
   bool write_blocked;
   bool signature_matches_build;
   bool official_signature;
+  bool hardware_matches_build;
   int last_error;
 };
 

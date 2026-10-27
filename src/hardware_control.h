@@ -3,7 +3,18 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-enum class FlightState;
+enum class FlightState {
+  Booting,
+  Calibrating,
+  Idle,
+  UsbMode,
+  Armed,
+  Boost,
+  Coast,
+  Descent,
+  Landed,
+  Fault
+};
 
 struct ImuSample {
   int16_t ax;
@@ -89,6 +100,7 @@ bool configureImu();
 bool calibratePadOrientation();
 bool setFlightState(enum FlightState nextState);
 void firePyro();
+void firePyroTestPulse();
 void updatePyroOutput();
 void recordFaultAndSafeStop();
 uint8_t readRegister(uint8_t csPin, uint8_t regAddr, SPISettings settings);
@@ -96,3 +108,4 @@ uint8_t readRegister(uint8_t csPin, uint8_t regAddr);
 void writeRegister(uint8_t csPin, uint8_t regAddr, uint8_t value, SPISettings settings);
 void writeRegister(uint8_t csPin, uint8_t regAddr, uint8_t value);
 ImuSample decodeSample(const uint8_t *rawData);
+float magnitude3(float x, float y, float z);  // defined in main.cpp

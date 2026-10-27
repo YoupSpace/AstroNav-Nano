@@ -86,12 +86,17 @@ The board enters USB mass-storage mode only when it classifies its input as USB 
 
 | Setting | Meaning | Default |
 | --- | --- | ---: |
-| `ESTIMATED_HEIGHT_M` | Expected apogee height in metres; helps tune flight expectations. | `120.0` |
+| `ESTIMATED_HEIGHT_M` | Expected apogee height in metres. Near this height apogee is confirmed faster. | `120.0` |
 | `HEIGHT_MARGIN_M` | Height tolerance around the estimate. | `20.0` |
-| `ESTIMATED_SPEED_MPS` | Expected climb speed in metres per second. | `35.0` |
+| `ESTIMATED_SPEED_MPS` | Expected top speed in metres per second; used to reject impossible barometer jumps. | `35.0` |
 | `SPEED_MARGIN_MPS` | Speed tolerance around the estimate. | `8.0` |
 | `LAUNCH_THRESHOLD_G` | Acceleration threshold used to confirm launch. | `1.35` |
 | `FIRE_PYRO_APOGEE` | Allows (`TRUE`) or blocks (`FALSE`) the automatic apogee pyro pulse. | `TRUE` |
+| `MIN_PYRO_FIRE_HEIGHT_M` | **Dangerous setting.** The pyro never fires unless the rocket climbed at least this many metres above the launch point. `0` disables this protection. | `5.0` |
+
+The estimate and margin settings are a **baseline**, not a limit: accurate values let the flight controller react faster and more precisely, but apogee and landing are still detected when the real flight is much lower or much higher than estimated.
+
+`MIN_PYRO_FIRE_HEIGHT_M` protects people handling an armed board: if a bump while carrying the rocket is mistaken for a launch, the pyro still cannot fire close to the ground. Only lower it if you fully understand the consequence. Independently of this setting, the pyro never fires when the barometer is unreliable, because parachute timing depends on it.
 
 Recommended beginner procedure:
 
@@ -125,7 +130,7 @@ The firmware moves through controlled states rather than jumping directly to out
 4. **Idle:** the board is ready and waiting for launch conditions.
 5. **Boost:** sustained acceleration indicates launch and powered ascent.
 6. **Coast:** boost has ended and the vehicle is still in flight.
-7. **Pyro fired:** the apogee output pulse has been issued and latched against repeat firing.
+7. **Descent:** apogee was detected. This state is always entered at apogee, also when the pyro is disabled or blocked; whether the pyro fired is shown in the log's `pyro` column and `PYRO_BLOCKED_REASON`.
 8. **Landed:** the vehicle has remained settled long enough to confirm landing.
 9. **Fault:** a critical issue has latched the system safe and disables the pyro output.
 
@@ -161,14 +166,16 @@ Resolve critical conditions before connecting any hazardous load.
 
 During flight the board samples sensors on a regular schedule and estimates altitude and vertical velocity from pressure, while using the IMU for acceleration, rotation, launch confirmation, and orientation-related checks.
 
-Launch requires sustained acceleration above the configured threshold. During boost and coast, apogee logic considers a drop from peak altitude, downward velocity, low acceleration, and minimum flight time. The firmware requires confirmation samples rather than acting on one noisy reading.
+Launch requires sustained acceleration above the configured threshold. Between launch and landing the board does not write to flash, so nothing can stall the sensor loop during the flight.
 
-When apogee is confirmed:
+During boost and coast, apogee requires a trustworthy barometer, free fall on the IMU (or a real barometric descent when the IMU is unavailable), and a minimum flight time. It triggers when the climb has stopped (velocity) or, as a backup, when the drop from the peak is clearly larger than noise. Confirmation samples are required rather than acting on one noisy reading. Physically impossible barometer jumps (for example a pressure spike from the ejection charge) are rejected before they reach the altitude estimate.
 
-- with `FIRE_PYRO_APOGEE=TRUE`, the pyro output can receive a one-second pulse if the safety conditions allow it;
+When apogee is confirmed the board enters `Descent`, and:
+
+- with `FIRE_PYRO_APOGEE=TRUE`, the pyro output receives a one-second pulse if the barometer is reliable and the peak is at least `MIN_PYRO_FIRE_HEIGHT_M` above the launch point;
 - with `FIRE_PYRO_APOGEE=FALSE`, the event is logged but the output is not fired.
 
-After the pyro event, the firmware looks for sustained low altitude trend, low vertical velocity, low acceleration, and stable gravity alignment before declaring `Landed`. It then flushes the mission log and updates stored flight records.
+`Landed` is declared when one sensor is completely calm and the other shows at most minimal movement (for example wind rocking). A rocket still swinging, for example in a tree, keeps waiting until it settles. A timeout that scales with the real peak height guarantees the log is always saved. The flight log header records what the board decided: `DETECTED_APOGEE_M`, `APOGEE_TRIGGER`, `PYRO_BLOCKED_REASON`, `LANDING_TRIGGER`, `BARO_REJECTED_SAMPLES` and `SAMPLE_GAPS`.
 
 Sensor fallback can allow healthy sensor paths to continue supporting state logic when another reading is invalid, but fallback behavior is not a reason to ignore warnings or continue an unsafe operation.
 
@@ -210,7 +217,7 @@ The log includes a sample counter and time in milliseconds, power mode, flight s
 | `FIRE_PYRO_APOGEE=FALSE` detection-only tests | Pro (optional) | Tests detection and logging without automatic apogee output. | Still treat the board as energized and verify the physical circuit. |
 | `PYROTEST` | Dangerous test | Bench verification of the pyro output path. | Never connect live hardware. Send `PYROTEST` twice within five seconds; the output pulse is limited to one second. |
 
-`PYROTEST` is accepted only outside USB storage mode and only in permitted flight states. It is deliberately not part of the normal beginner workflow.
+`PYROTEST` is a ground-only test: it is accepted only in `Idle` (flight mode, calibrated, before any launch), never in USB storage mode and never during or after a flight. It does not use up the flight pyro, so after replacing the igniter the board can still deploy on the next flight without a reboot. It is deliberately not part of the normal beginner workflow.
 
 ## 11. Troubleshooting
 
@@ -234,6 +241,10 @@ Place the board on a stable surface, stop vibration, check IMU and barometer con
 
 This indicates a latched fault condition. The pyro output is disabled safely. Keep hazardous hardware disconnected, read `FAULT_REASON` and the health checks, and correct the underlying problem before rebooting or retesting.
 
+### The board reboots or freezes after a firmware update
+
+If this started after the flight-log storage was changed (RAM log buffer or flash filesystem size), the board may be running out of memory. See "Flight Log Storage" in [SOFTWARE_DESIGN.md](SOFTWARE_DESIGN.md) and reduce the RAM log buffer. Note that changing the filesystem size erases all logs and `Settings.ini` on the first boot, so copy your logs off the board before such an update.
+
 ### Settings do not seem to change
 
 Confirm the key spelling and value format, save the file, safely eject the drive, and reconnect or reboot. Change only the `[settings]` values; diagnostic sections are generated by the firmware.
@@ -241,6 +252,12 @@ Confirm the key spelling and value format, save the file, safely eject the drive
 ### A log is missing
 
 Wait for the landing/save process to complete, then reconnect over USB and inspect `/logs`. Check flash filesystem health and serial output. Do not remove power during a write.
+
+Check the `[storage]` section of `Settings.ini`: `LAST_LOG_STATUS=truncated_storage_full` means the flash was full and the end of the flight could not be saved (the log header then says how many samples were dropped). `STORAGE_FREE_KB` and `ESTIMATED_LOG_SECONDS_FREE` show how much room is left; copy old logs off the board and delete them to make room. The firmware never deletes your files itself.
+
+### Settings were reset to a default value
+
+If a value in `[settings]` is not a valid number, is out of range, or is `nan`/`inf`, the board ignores it, uses the safe default and rewrites the file so you can see what is active. An unrecognized `FIRE_PYRO_APOGEE` value is treated as `FALSE`. The serial output names the rejected key.
 
 ## 12. One-page operating checklist
 

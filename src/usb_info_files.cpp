@@ -24,8 +24,11 @@ void writeHowtoText(File &file) {
   file.println("3. Wait a moment for the board to switch to flight mode.");
   file.println();
   file.println("What the settings mean:");
+  file.println("The ESTIMATED_* and *_MARGIN_* values are a baseline: good estimates make the");
+  file.println("flight controller react faster and more precisely, but they never block an event.");
+  file.println("Apogee and landing are still detected if the real flight is much lower or higher.");
   file.println("- ESTIMATED_HEIGHT_M: your best estimate of apogee height in meters.");
-  file.println("  This helps the apogee detector know how much altitude drop to expect.");
+  file.println("  Near this height apogee is confirmed faster.");
   file.println("- HEIGHT_MARGIN_M: extra height margin around the estimate.");
   file.println("  Higher values make apogee and landing detection more forgiving.");
   file.println("- ESTIMATED_SPEED_MPS: expected climb speed in meters per second.");
@@ -36,6 +39,10 @@ void writeHowtoText(File &file) {
   file.println("  Lower values trigger earlier, higher values require a harder launch.");
   file.println("- FIRE_PYRO_APOGEE: enable pyro firing at apogee when TRUE.");
   file.println("  Set FALSE to keep logging the apogee event without firing the pyro at apogee.");
+  file.println("- MIN_PYRO_FIRE_HEIGHT_M: DANGEROUS SETTING. The pyro never fires unless the rocket");
+  file.println("  climbed at least this many meters above the launch point (default 5).");
+  file.println("  The pyro also never fires when the barometer is unreliable.");
+  file.println("  Lowering this, or setting 0, removes protection for people handling the rocket.");
   file.println();
   file.println("How to edit Settings.ini:");
   file.println("1. Open Settings.ini in a text editor.");
@@ -70,7 +77,8 @@ void writeSettingsSection(File &file,
              float heightMarginM,
              float speedMarginMps,
              float launchThresholdG,
-             bool firePyroAtApogee) {
+             bool firePyroAtApogee,
+             float minPyroFireHeightM) {
   file.println("[settings]");
   file.println("; AstroNav Nano flight settings");
   file.println("; Edit the values below, then save the file.");
@@ -81,6 +89,9 @@ void writeSettingsSection(File &file,
   printFloatValue(file, "SPEED_MARGIN_MPS", speedMarginMps, 1);
   printFloatValue(file, "LAUNCH_THRESHOLD_G", launchThresholdG, 2);
   file.printf("FIRE_PYRO_APOGEE=%s\n", firePyroAtApogee ? "TRUE" : "FALSE");
+  file.println("; DANGEROUS SETTING: the pyro never fires below this height above the launch point.");
+  file.println("; It protects people handling an armed board on the ground. 0 disables the protection.");
+  printFloatValue(file, "MIN_PYRO_FIRE_HEIGHT_M", minPyroFireHeightM, 1);
 }
 
 void writeDebugSection(File &file,

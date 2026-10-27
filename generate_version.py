@@ -50,6 +50,9 @@ ANSI_YELLOW = "\033[33m"
 ANSI_CYAN = "\033[36m"
 SERIAL_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 TRUE_ENV_VALUES = {"1", "true", "yes", "y", "on"}
+# Only ports of this USB vendor (Raspberry Pi, RP2040/RP2350) are probed besides the upload port,
+# so serial commands are never sent to unrelated devices such as printers or other boards.
+RASPBERRY_PI_USB_VID = 0x2E8A
 
 UPLOAD_STATUS = {
     "requested": False,
@@ -553,6 +556,25 @@ def clear_pending_if_matches_display_serial(display_serial):
         PENDING_SERIAL_PATH.unlink(missing_ok=True)
 
 
+def get_candidate_serial_ports(upload_port, list_ports):
+    candidates = []
+    preferred_port = (upload_port or "").strip()
+    if preferred_port:
+        candidates.append(preferred_port)
+    try:
+        for port_info in list_ports.comports():
+            device_name = str(getattr(port_info, "device", "")).strip()
+            if (
+                device_name
+                and device_name not in candidates
+                and getattr(port_info, "vid", None) == RASPBERRY_PI_USB_VID
+            ):
+                candidates.append(device_name)
+    except Exception:
+        pass
+    return candidates
+
+
 def read_otp_display_serial_from_device(upload_port):
     try:
         import serial  # type: ignore
@@ -591,23 +613,11 @@ def read_otp_display_serial_from_device(upload_port):
 
     preferred_port = upload_port.strip()
     if not preferred_port:
-        print(color_text(ANSI_YELLOW, "WARNING: Upload port is unknown. Scanning available serial ports for OTP readback."))
+        print(color_text(ANSI_YELLOW, "WARNING: Upload port is unknown. Scanning Raspberry Pi USB serial ports for OTP readback."))
 
     discovery_deadline = time.monotonic() + 12.0
     while time.monotonic() < discovery_deadline:
-        candidate_ports = []
-        if preferred_port:
-            candidate_ports.append(preferred_port)
-
-        try:
-            for port_info in list_ports.comports():
-                device_name = str(getattr(port_info, "device", "")).strip()
-                if device_name and device_name not in candidate_ports:
-                    candidate_ports.append(device_name)
-        except Exception:
-            pass
-
-        for candidate in candidate_ports:
+        for candidate in get_candidate_serial_ports(preferred_port, list_ports):
             parsed = query_port(candidate)
             if parsed is not None:
                 return parsed
@@ -652,12 +662,7 @@ def read_otp_preflight_from_device(upload_port):
             return None
         return status if any(value is not None for value in status.values()) else None
 
-    candidates = [upload_port.strip()] if upload_port.strip() else []
-    try:
-        candidates.extend(info.device for info in list_ports.comports() if info.device not in candidates)
-    except Exception:
-        pass
-    for candidate in candidates:
+    for candidate in get_candidate_serial_ports(upload_port, list_ports):
         status = query_port(candidate)
         if status is not None:
             return status
@@ -671,12 +676,7 @@ def read_health_from_device(upload_port):
     except Exception:
         return None
 
-    candidates = [upload_port.strip()] if upload_port.strip() else []
-    try:
-        candidates.extend(info.device for info in list_ports.comports() if info.device not in candidates)
-    except Exception:
-        pass
-    for candidate in candidates:
+    for candidate in get_candidate_serial_ports(upload_port, list_ports):
         try:
             with serial.Serial(candidate, 115200, timeout=0.25, write_timeout=1) as port:
                 port.reset_input_buffer()

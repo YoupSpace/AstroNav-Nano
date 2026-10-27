@@ -3,3 +3,6 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Generated at build time by generate_version.py (contains per-build serial/signature data)
+include/build_info.h

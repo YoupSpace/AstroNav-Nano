@@ -13,7 +13,8 @@ void writeSettingsSection(File &file,
 					   float heightMarginM,
 					   float speedMarginMps,
 						   float launchThresholdG,
-						   bool firePyroAtApogee);
+						   bool firePyroAtApogee,
+						   float minPyroFireHeightM);
 void writeDebugSection(File &file,
 				  const char *faultReason,
 				  bool coreTickOk,
