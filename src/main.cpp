@@ -78,6 +78,17 @@ static constexpr float APOGEE_BACKUP_DROP_MIN_M = 0.5f;
 static constexpr float APOGEE_BACKUP_DROP_MAX_M = 5.0f;
 // Without the IMU's free-fall check, the barometer must show a real descent.
 static constexpr float APOGEE_BARO_ONLY_DESCENT_MPS = -1.0f;
+// Fallback when the IMU never reads free fall (tumbling, spinning, board far from the CG):
+// a clear barometer descent still declares apogee, a little late but before it is too fast.
+static constexpr float APOGEE_FALLBACK_DESCENT_MPS = -3.0f;
+static constexpr float APOGEE_FALLBACK_MIN_DROP_M = 2.0f;
+static constexpr uint8_t APOGEE_FALLBACK_CONFIRM_SAMPLES = 3;
+// The fallback is only allowed after a real powered climb. Walking, stairs or a lift stay
+// far below this, so carrying a falsely triggered board downhill cannot fire the pyro.
+static constexpr float APOGEE_FALLBACK_MIN_CLIMB_MPS = 10.0f;
+// A "launch" that comes to rest without climbing this high was a bump while handling the
+// rocket: return to Idle so the real launch is still detected and the pyro stays available.
+static constexpr float FALSE_LAUNCH_MAX_CLIMB_M = 3.0f;
 // If the pyro was blocked only by a momentary barometer glitch, it may still fire
 // shortly after apogee; later than this the parachute timing would be wrong.
 static constexpr uint32_t PYRO_RETRY_WINDOW_MS = 1000;
@@ -152,17 +163,17 @@ enum class PowerMode {
   LiPo2S
 };
 
+// One distinct colour per state; boot (white), USB (blue) and fault (red) are never reused.
 enum class LedProfile {
-  Boot,
-  Calibrating,
-  Idle,
-  IdleUsb,
-  Idle1S,
-  Idle2S,
-  Coast,
-  Warning,
-  Landed,
-  Fault
+  Boot,          // white, breathing
+  Calibrating,   // yellow, blinking
+  Idle,          // green, breathing: ready for launch
+  Usb,           // blue, breathing
+  Boost,         // orange, solid
+  Coast,         // purple, solid
+  Descent,       // cyan, solid
+  Landed,        // magenta, blinking
+  Fault          // red, fast blinking
 };
 
 struct FlightSample {
@@ -248,6 +259,15 @@ char serialCommandBuffer[48] = {0};
 uint8_t serialCommandLength = 0;
 bool pyroTestPendingConfirm = false;
 uint32_t pyroTestConfirmUntilMs = 0;
+// GYROTEST: integrates the bias-corrected gyro into a total angle per axis, so the gyro
+// scale can be checked by turning the board a known angle (speed does not matter).
+static constexpr uint32_t GYRO_TEST_DURATION_MS = 10000;
+bool gyroTestActive = false;
+uint32_t gyroTestEndMs = 0;
+uint32_t gyroTestLastSampleMs = 0;
+float gyroTestAngleX = 0.0f;
+float gyroTestAngleY = 0.0f;
+float gyroTestAngleZ = 0.0f;
 
 float currentVinVoltage = 0.0f;
 float currentAx = 0.0f;
@@ -277,7 +297,10 @@ float gyroBiasZ = 0.0f;
 uint8_t launchConfirmCount = 0;
 uint8_t boostDecayConfirmCount = 0;
 uint8_t apogeeConfirmCount = 0;
+uint8_t apogeeFallbackConfirmCount = 0;
 uint8_t landingConfirmCount = 0;
+uint32_t flightCountBeforeLaunch = 0;
+uint32_t falseLaunchCount = 0;
 uint8_t apogeePeakHoldCount = 0;
 uint32_t apogeePeakHoldStartMs = 0;
 uint8_t imuFailureCount = 0;
@@ -286,6 +309,7 @@ uint32_t imuFailureWindowStartMs = 0;
 uint32_t baroFailureWindowStartMs = 0;
 uint32_t logCounter = 0;
 float peakFlightSpeedMps = 0.0f;
+float peakClimbRateMps = 0.0f;   // fastest climb, from accepted barometer samples only
 float peakAccelMagG = 0.0f;
 bool apogeeDetected = false;
 float detectedApogeeAltitudeM = 0.0f;
@@ -432,6 +456,8 @@ bool setFlightState(FlightState nextState) {
   if (flightState == nextState) {
     return true;
   }
+  // Boost/Coast -> Idle is only used by abortFalseLaunch(), which runs before any apogee
+  // (so before the pyro can have fired) and after the barometer showed no real climb.
 
   bool allowed = false;
   switch (flightState) {
@@ -452,10 +478,12 @@ bool setFlightState(FlightState nextState) {
       break;
     case FlightState::Boost:
       allowed = (nextState == FlightState::Coast || nextState == FlightState::Descent ||
-                 nextState == FlightState::Landed || nextState == FlightState::Fault);
+                 nextState == FlightState::Landed || nextState == FlightState::Idle ||
+                 nextState == FlightState::Fault);
       break;
     case FlightState::Coast:
-      allowed = (nextState == FlightState::Descent || nextState == FlightState::Landed || nextState == FlightState::Fault);
+      allowed = (nextState == FlightState::Descent || nextState == FlightState::Landed ||
+                 nextState == FlightState::Idle || nextState == FlightState::Fault);
       break;
     case FlightState::Descent:
       allowed = (nextState == FlightState::Landed || nextState == FlightState::Fault);
@@ -1008,7 +1036,9 @@ bool loadOrCreateDeviceProfile() {
 }
 
 void persistDeviceProfile() {
-  if (!storageReady || ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
+  // Never write while the drive is exported to the computer: the host and the firmware
+  // must not use the flash at the same time.
+  if (!storageReady || usbDriveReady || ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
     return;
   }
 
@@ -1261,6 +1291,7 @@ void prepareNextFlightNumber() {
 // Runs at launch detection: RAM only. The flight count and records are written to
 // flash after landing (finalizeFlightPersonalRecords), never during the flight.
 void startMissionLog() {
+  flightCountBeforeLaunch = deviceProfile.flightCount;
   currentFlightNumber = nextFlightNumber;
   snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(currentFlightNumber));
   deviceProfile.flightCount = currentFlightNumber;
@@ -1278,6 +1309,7 @@ void startMissionLog() {
   launchConfirmCount = 0;
   boostDecayConfirmCount = 0;
   apogeeConfirmCount = 0;
+  apogeeFallbackConfirmCount = 0;
   landingConfirmCount = 0;
   apogeePeakHoldCount = 0;
   apogeePeakHoldStartMs = 0;
@@ -1285,6 +1317,7 @@ void startMissionLog() {
   missionLogFlushed = false;
   flightRecordsPendingSave = true;
   peakFlightSpeedMps = 0.0f;
+  peakClimbRateMps = 0.0f;
   peakAccelMagG = 0.0f;
   apogeeDetected = false;
   detectedApogeeAltitudeM = 0.0f;
@@ -1296,6 +1329,40 @@ void startMissionLog() {
   pyroRetryUntilMs = 0;
   sampleGaps = 0;
   resetMissionLogWriter();
+}
+
+// Undoes startMissionLog() after a false launch (a bump while handling): the RAM log is
+// discarded, the flight number is reused and the board is back in Idle, so the real launch
+// is detected and the pyro is still available. Nothing was written to flash for it.
+// Returns false (caller then lands normally) if the state change is refused.
+bool abortFalseLaunch() {
+  if (!setFlightState(FlightState::Idle)) {
+    return false;
+  }
+  falseLaunchCount++;
+  Serial.printf("[FLIGHT] False launch: climbed only %.2f m, back to idle (count=%lu).\n",
+                peakAltitude - launchAltitudeM, static_cast<unsigned long>(falseLaunchCount));
+  missionStarted = false;
+  missionLogCount = 0;
+  logCounter = 0;
+  flightRecordsPendingSave = false;
+  deviceProfile.flightCount = flightCountBeforeLaunch;
+  assets.TotalFlights = static_cast<uint16_t>(deviceProfile.flightCount > UINT16_MAX ? UINT16_MAX : deviceProfile.flightCount);
+  resetMissionLogWriter();
+  launchConfirmCount = 0;
+  boostDecayConfirmCount = 0;
+  apogeeConfirmCount = 0;
+  apogeeFallbackConfirmCount = 0;
+  landingConfirmCount = 0;
+  apogeePeakHoldCount = 0;
+  apogeePeakHoldStartMs = 0;
+  peakAltitude = 0.0f;
+  peakFlightSpeedMps = 0.0f;
+  peakClimbRateMps = 0.0f;
+  peakAccelMagG = 0.0f;
+  landingTrigger = "none";
+  pyroBlockedReason = "none";
+  return true;
 }
 
 void finalizeFlightPersonalRecords() {
@@ -1339,9 +1406,11 @@ void appendMissionSample() {
   sample.axMg = static_cast<int16_t>(lroundf(currentAx * 1000.0f));
   sample.ayMg = static_cast<int16_t>(lroundf(currentAy * 1000.0f));
   sample.azMg = static_cast<int16_t>(lroundf(currentAz * 1000.0f));
-  sample.gxDps10 = static_cast<int16_t>(lroundf((currentGx - gyroBiasX) * 10.0f));
-  sample.gyDps10 = static_cast<int16_t>(lroundf((currentGy - gyroBiasY) * 10.0f));
-  sample.gzDps10 = static_cast<int16_t>(lroundf((currentGz - gyroBiasZ) * 10.0f));
+  // The gyro range is +-4000 dps, more than int16 holds at 0.1 dps resolution: clamp
+  // (saturates at +-3276.7 dps in the log) instead of wrapping around.
+  sample.gxDps10 = static_cast<int16_t>(lroundf(clampFloat((currentGx - gyroBiasX) * 10.0f, -32768.0f, 32767.0f)));
+  sample.gyDps10 = static_cast<int16_t>(lroundf(clampFloat((currentGy - gyroBiasY) * 10.0f, -32768.0f, 32767.0f)));
+  sample.gzDps10 = static_cast<int16_t>(lroundf(clampFloat((currentGz - gyroBiasZ) * 10.0f, -32768.0f, 32767.0f)));
   sample.tempCd10 = static_cast<int16_t>(lroundf(currentTemperature * 10.0f));
   sample.pressureHd10 = static_cast<uint16_t>(lroundf(clampFloat(currentPressure * 10.0f, 0.0f, 65535.0f)));
   sample.batteryVoltageMv = static_cast<int16_t>(lroundf(clampFloat(currentVinVoltage * 1000.0f, -32768.0f, 32767.0f)));
@@ -1440,7 +1509,7 @@ bool configureUsbVolumeLabel() {
 }
 
 void ensureUsbInfoFiles() {
-  if (!storageReady || ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
+  if (!storageReady || usbDriveReady || ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
     return;
   }
 
@@ -1541,6 +1610,34 @@ void enterFlightModeFromUsb() {
   }
 }
 
+// Debug only, read-only: never touches the pyro or the flight logic. Runs in the sample tick
+// and stops by itself after GYRO_TEST_DURATION_MS, or as soon as the board leaves Idle.
+void updateGyroTest(bool imuSampleOk, uint32_t now) {
+  if (!gyroTestActive) {
+    return;
+  }
+  if (flightState != FlightState::Idle || missionStarted) {
+    gyroTestActive = false;
+    Serial.printf("[GYROTEST] Cancelled: board left idle (state=%s).\n", stateText(flightState));
+    return;
+  }
+  // Signed: the command can start the test after loop() captured `now`, which would make an
+  // unsigned difference wrap around to ~49 days on the first sample.
+  int32_t elapsedMs = static_cast<int32_t>(now - gyroTestLastSampleMs);
+  if (imuSampleOk && elapsedMs > 0) {
+    float dtS = static_cast<float>(elapsedMs) / 1000.0f;
+    gyroTestAngleX += (currentGx - gyroBiasX) * dtS;
+    gyroTestAngleY += (currentGy - gyroBiasY) * dtS;
+    gyroTestAngleZ += (currentGz - gyroBiasZ) * dtS;
+    gyroTestLastSampleMs = now;
+  }
+  if (static_cast<int32_t>(now - gyroTestEndMs) >= 0) {
+    gyroTestActive = false;
+    Serial.printf("[GYROTEST] Result: x=%.1f y=%.1f z=%.1f deg (turned 90 deg flat on the table: z should read about +-90)\n",
+                  gyroTestAngleX, gyroTestAngleY, gyroTestAngleZ);
+  }
+}
+
 void handleSerialCommand(const char *command) {
   if (!command || !command[0]) {
     return;
@@ -1592,6 +1689,22 @@ void handleSerialCommand(const char *command) {
 
   pyroTestPendingConfirm = false;
 
+  if (strcmp(upperCommand, "GYROTEST") == 0) {
+    // Flight mode only (calibrated, in Idle): the gyro bias comes from the pad calibration.
+    if (flightState != FlightState::Idle || missionStarted) {
+      Serial.printf("[GYROTEST] Blocked: only allowed in idle in flight mode (state=%s).\n", stateText(flightState));
+      return;
+    }
+    gyroTestAngleX = 0.0f;
+    gyroTestAngleY = 0.0f;
+    gyroTestAngleZ = 0.0f;
+    gyroTestLastSampleMs = millis();
+    gyroTestEndMs = gyroTestLastSampleMs + GYRO_TEST_DURATION_MS;
+    gyroTestActive = true;
+    Serial.println("[GYROTEST] Started: within 10 s, slowly turn the board flat on the table by exactly 90 deg (against a straight edge) and hold it still.");
+    return;
+  }
+
   if (strcmp(upperCommand, "DUMP_OTP") == 0) {
     printAstroNavOtpSummary();
     return;
@@ -1619,8 +1732,11 @@ void handleSerialCommand(const char *command) {
     return;
   }
 
+  // Only from USB storage mode. powerMode is re-measured every sample, so a battery reading
+  // in the USB range (sag under load, or a 1S LiPo with a USB cable) must not re-run the
+  // remount and recalibration from Idle or during a flight.
   if ((strcmp(upperCommand, "FLIGHT") == 0 || strcmp(upperCommand, "EXITUSB") == 0 || strcmp(upperCommand, "ARM") == 0) &&
-      powerMode == PowerMode::USB && !usbFlightOverride) {
+      flightState == FlightState::UsbMode && !usbFlightOverride) {
     enterFlightModeFromUsb();
   }
 }
@@ -1766,6 +1882,9 @@ void writeOldestLogRows(File &logFile, uint16_t count) {
 }
 
 bool openMissionLogFile(File &logFile, const char *mode) {
+  if (usbDriveReady) {
+    return false;   // the computer owns the flash while the drive is attached
+  }
   ensureLogsDirectory();
   logFile = FatFS.open(missionLogPath, mode);
   if (!logFile) {
@@ -1860,12 +1979,14 @@ void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void setLedProfile(LedProfile profile) {
+  // Pattern: blinking = needs attention (calibrating, landed), breathing = waiting on the
+  // ground (boot, idle, USB), solid = in flight.
   float pulse = 1.0f;
   if (profile == LedProfile::Calibrating) {
     pulse = (millis() % 500UL) < 250UL ? 1.0f : 0.0f;
   } else if (profile == LedProfile::Landed) {
     pulse = (millis() % 400UL) < 200UL ? 1.0f : 0.0f;
-  } else if (profile != LedProfile::Fault) {
+  } else if (profile == LedProfile::Boot || profile == LedProfile::Idle || profile == LedProfile::Usb) {
     uint32_t now = millis();
     float phase = static_cast<float>((now % 2000UL)) / 2000.0f;
     pulse = 0.10f + 0.90f * (0.5f + 0.5f * sinf(phase * 6.2831853f));
@@ -1883,25 +2004,22 @@ void setLedProfile(LedProfile profile) {
       scaleAndSet(255, 255, 0);
       break;
     case LedProfile::Idle:
-      scaleAndSet(0, 255, 96);
+      scaleAndSet(0, 255, 0);
       break;
-    case LedProfile::IdleUsb:
+    case LedProfile::Usb:
       scaleAndSet(0, 128, 255);
       break;
-    case LedProfile::Idle1S:
-      scaleAndSet(255, 224, 0);
-      break;
-    case LedProfile::Idle2S:
-      scaleAndSet(255, 128, 0);
+    case LedProfile::Boost:
+      scaleAndSet(255, 80, 0);
       break;
     case LedProfile::Coast:
-      scaleAndSet(176, 0, 255);
+      scaleAndSet(160, 0, 255);
       break;
-    case LedProfile::Warning:
-      scaleAndSet(255, 0, 192);
+    case LedProfile::Descent:
+      scaleAndSet(0, 255, 255);
       break;
     case LedProfile::Landed:
-      scaleAndSet(0, 220, 160);
+      scaleAndSet(255, 0, 255);
       break;
     case LedProfile::Fault:
     default:
@@ -1936,22 +2054,20 @@ void updateStatusLed() {
       setLedProfile(LedProfile::Calibrating);
       break;
     case FlightState::Idle:
+    case FlightState::Armed:   // not used by the flight logic; shown like Idle
       setLedProfile(LedProfile::Idle);
       break;
     case FlightState::UsbMode:
-      setLedProfile(LedProfile::IdleUsb);
-      break;
-    case FlightState::Armed:
-      setLedProfile(LedProfile::Idle1S);
+      setLedProfile(LedProfile::Usb);
       break;
     case FlightState::Boost:
-      setLedProfile(LedProfile::Idle2S);
+      setLedProfile(LedProfile::Boost);
       break;
     case FlightState::Coast:
       setLedProfile(LedProfile::Coast);
       break;
     case FlightState::Descent:
-      setLedProfile(LedProfile::Warning);
+      setLedProfile(LedProfile::Descent);
       break;
     case FlightState::Landed:
       setLedProfile(LedProfile::Landed);
@@ -2092,7 +2208,7 @@ void updateAltitudeEstimate() {
   }
 }
 
-// Apogee pyro with software safety gates. PYROTEST uses firePyro() directly.
+// Apogee pyro with software safety gates. PYROTEST uses firePyroTestPulse() instead.
 void tryApogeePyro(bool baroReliable) {
   if (pyroLatched) {
     return;
@@ -2126,7 +2242,11 @@ void updateFlightStateFromSamples() {
   }
 
   updateAltitudeEstimate();
-  if ((flightState == FlightState::Boost || flightState == FlightState::Coast) && !baroSampleRejected) {
+  // Peak only from a barometer reading accepted this tick. During a dropout the estimate is
+  // extrapolated at the last climb rate, which overshoots while the rocket slows down; a peak
+  // taken from that could make the drop-from-peak trigger fire while still climbing.
+  bool baroAcceptedThisSample = baroSampleFresh && baroSamplesSinceAccepted == 0;
+  if ((flightState == FlightState::Boost || flightState == FlightState::Coast) && baroAcceptedThisSample) {
     if (currentAltitude > peakAltitude) {
       peakAltitude = currentAltitude;
       apogeePeakHoldCount = 0;
@@ -2154,6 +2274,9 @@ void updateFlightStateFromSamples() {
     float verticalSpeedAbs = fabsf(currentVerticalVelocity);
     if (verticalSpeedAbs > peakFlightSpeedMps) {
       peakFlightSpeedMps = verticalSpeedAbs;
+    }
+    if (baroAcceptedThisSample && currentVerticalVelocity > peakClimbRateMps) {
+      peakClimbRateMps = currentVerticalVelocity;
     }
   }
 
@@ -2255,19 +2378,40 @@ void updateFlightStateFromSamples() {
                         apogeePeakHoldCount >= APOGEE_HOLD_SAMPLES &&
                         (millis() - apogeePeakHoldStartMs) <= APOGEE_FIRE_MAX_MS;
 
-    if (apogeeConfirmCount >= requiredApogeeSamples || peakHoldFire) {
+    // Fallback without the free-fall check: if the IMU never reads free fall (tumbling,
+    // spinning, board far from the centre of gravity), a clear, sustained barometer descent
+    // still declares apogee. A late deployment is safer than none. Not while the motor
+    // could still be pushing (IMU above the launch threshold).
+    bool notUnderThrust = !imuReliable || accelMag < flightLaunchThresholdG;
+    bool descentFallback = baroReliable && !baroSampleRejected && pastMinFlightTime && notUnderThrust &&
+                           peakClimbRateMps >= APOGEE_FALLBACK_MIN_CLIMB_MPS &&
+                           currentVerticalVelocity <= APOGEE_FALLBACK_DESCENT_MPS &&
+                           altitudeDropFromPeakM >= fmaxf(APOGEE_FALLBACK_MIN_DROP_M, flightApogeeDropM);
+    if (descentFallback) {
+      if (apogeeFallbackConfirmCount < 255) {
+        apogeeFallbackConfirmCount++;
+      }
+    } else {
+      apogeeFallbackConfirmCount = 0;
+    }
+    bool fallbackFire = apogeeFallbackConfirmCount >= APOGEE_FALLBACK_CONFIRM_SAMPLES;
+
+    if (apogeeConfirmCount >= requiredApogeeSamples || peakHoldFire || fallbackFire) {
       apogeeDetected = true;
       detectedApogeeAltitudeM = peakAltitude;
       detectedApogeeMs = millis() - bootMs;
       if (apogeeConfirmCount >= requiredApogeeSamples) {
         apogeeTrigger = velocityApogee ? "velocity" : "drop";
-      } else {
+      } else if (peakHoldFire) {
         apogeeTrigger = "peak_hold";
+      } else {
+        apogeeTrigger = "baro_descent";
       }
       setFlightState(FlightState::Descent);
       pyroRetryUntilMs = millis() + PYRO_RETRY_WINDOW_MS;
       tryApogeePyro(baroReliable);
       apogeeConfirmCount = 0;
+      apogeeFallbackConfirmCount = 0;
       apogeePeakHoldCount = 0;
       apogeePeakHoldStartMs = 0;
     }
@@ -2328,7 +2472,17 @@ void updateFlightStateFromSamples() {
       landingConfirmCount = 0;
     }
 
+    // Came to rest before any apogee and the barometer never saw a real climb: this was a
+    // bump while handling, not a flight. Only with a working barometer, so a real flight
+    // whose barometer failed still lands and keeps its log.
+    bool noRealClimb = !apogeeDetected && baroReliable &&
+                       (flightState == FlightState::Boost || flightState == FlightState::Coast) &&
+                       (peakAltitude - launchAltitudeM) < FALSE_LAUNCH_MAX_CLIMB_M;
+
     if (landingConfirmCount >= requiredLandingSamples) {
+      if (noRealClimb && abortFalseLaunch()) {
+        return;
+      }
       landingTrigger = candidateTrigger;
       setFlightState(FlightState::Landed);
     } else {
@@ -2343,6 +2497,9 @@ void updateFlightStateFromSamples() {
                                                             static_cast<float>(LANDING_TIMEOUT_MAX_MS)));
       bool stillDescending = baroReliable && altitudeWindowFull && altitudeSpan > LANDING_BARO_MINIMAL_SPAN_M;
       if ((sinceLaunchMs >= timeoutMs && !stillDescending) || sinceLaunchMs >= LANDING_TIMEOUT_MAX_MS) {
+        if (noRealClimb && abortFalseLaunch()) {
+          return;
+        }
         landingTrigger = "timeout";
         setFlightState(FlightState::Landed);
       }
@@ -2351,6 +2508,15 @@ void updateFlightStateFromSamples() {
 }
 
 void setup() {
+  // Drive the pyro and servo outputs low before anything else (serial wait, OTP, sensors),
+  // so they are never left floating during boot.
+  pinMode(PIN_PYRO, OUTPUT);
+  digitalWrite(PIN_PYRO, LOW);
+  pinMode(PIN_SERVO_1, OUTPUT);
+  pinMode(PIN_SERVO_2, OUTPUT);
+  digitalWrite(PIN_SERVO_1, LOW);
+  digitalWrite(PIN_SERVO_2, LOW);
+
   Serial.begin(115200);
   led.begin();
   led.setBrightness(40);
@@ -2376,13 +2542,6 @@ void setup() {
   initializeAstroNavOtp();
   printAstroNavOtpSummary();
   Serial.println("[BOOT] stage=otp_complete");
-
-  pinMode(PIN_PYRO, OUTPUT);
-  pinMode(PIN_SERVO_1, OUTPUT);
-  pinMode(PIN_SERVO_2, OUTPUT);
-  digitalWrite(PIN_PYRO, LOW);
-  digitalWrite(PIN_SERVO_1, LOW);
-  digitalWrite(PIN_SERVO_2, LOW);
 
   pinMode(PIN_CS_IMU, OUTPUT);
   pinMode(PIN_CS_BMP, OUTPUT);
@@ -2464,13 +2623,9 @@ void setup() {
     prepareNextFlightNumber();
     // Keep FLASH_STAMP aligned with the currently flashed firmware build.
     buildFlashStamp(deviceProfile.flashStamp, sizeof(deviceProfile.flashStamp));
-    if (ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
-      Serial.println("[BOOT] stage=profile_persist_skipped_recovery");
-    } else {
-      Serial.println("[BOOT] stage=profile_persist_begin");
-      persistDeviceProfile();
-      Serial.println("[BOOT] stage=profile_persist_complete");
-    }
+    // Settings.ini is written once per boot: by ensureUsbInfoFiles() before the USB drive is
+    // exported, or at the end of setup() in flight mode. That write also covers any
+    // corrected settings from loadFlightSettings().
     settingsNeedPersist = false;
   }
 
@@ -2529,8 +2684,12 @@ void setup() {
     }
   }
 
-  if (storageReady) {
+  // Skipped while the USB drive is attached (checked inside persistDeviceProfile): in USB
+  // mode the file was already written before the drive was exported.
+  if (storageReady && !usbDriveReady) {
+    Serial.println("[BOOT] stage=profile_persist_begin");
     persistDeviceProfile();
+    Serial.println("[BOOT] stage=profile_persist_complete");
   }
 
   updateStatusLed();
@@ -2553,7 +2712,7 @@ void loop() {
     }
   }
 
-  if (powerMode == PowerMode::USB && !usbFlightOverride && shouldExitUsbModeFromUsbFiles()) {
+  if (flightState == FlightState::UsbMode && !usbFlightOverride && shouldExitUsbModeFromUsbFiles()) {
     enterFlightModeFromUsb();
   }
 
@@ -2598,7 +2757,8 @@ void loop() {
     float gy = 0.0f;
     float gz = 0.0f;
 
-    if (imuInitialized && readImuFrame(ax, ay, az, gx, gy, gz)) {
+    bool imuSampleOk = imuInitialized && readImuFrame(ax, ay, az, gx, gy, gz);
+    if (imuSampleOk) {
       currentAx = ax;
       currentAy = ay;
       currentAz = az;
@@ -2621,9 +2781,12 @@ void loop() {
       recordSensorResult(false, boardHealth.baroOk, baroFailureCount, baroFailureWindowStartMs);
     }
 
-    if ((boardHealth.imuStreamOk || boardHealth.baroOk) && !boardHealth.critical) {
+    // Also runs when both sensors failed: every decision inside requires a reliable sensor,
+    // but the landing timeout must still run so the flight log is saved.
+    if (!boardHealth.critical) {
       updateFlightStateFromSamples();
     }
+    updateGyroTest(imuSampleOk, now);
 
     if (missionStarted || flightState == FlightState::Idle) {
       appendMissionSample();

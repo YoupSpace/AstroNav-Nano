@@ -180,10 +180,10 @@ These usually mean the heap or stack has run out. Reduce `FLIGHT_LOG_CAPACITY` (
 
 The IMU raw values are converted using fixed scale factors:
 
-- Accelerometer: 1024 counts per g
-- Gyroscope: 16.4 counts per deg/s
+- Accelerometer: 1024 counts per g (`ACCEL_CONFIG0 = 0x06`: full scale ±32 g)
+- Gyroscope: 8.2 counts per deg/s (`GYRO_CONFIG0 = 0x06`: full scale ±4000 deg/s)
 
-These numbers are used after reading raw 16-bit sensor data.
+These numbers are used after reading raw 16-bit sensor data. Both registers use full-scale select code 0, the largest range. Until v1.2.1 the gyro was divided by 16.4 (the ±2000 deg/s factor), so gyro values were half the real rate. The flight log stores the gyro in 0.1 deg/s steps in 16 bits, so logged rates saturate at ±3276.7 deg/s. The TestTools project still uses 16.4.
 
 ### ADC conversion
 
@@ -211,7 +211,7 @@ The setup sequence is important and should be preserved.
 7. Set ADC resolution to 12 bits.
 8. Wait up to 3 seconds for Serial connection.
 9. Print a banner to the console.
-10. Configure GPIO1, GPIO2, and GPIO3 as outputs and drive them low.
+10. Configure GPIO1, GPIO2, and GPIO3 as outputs and drive them low. (The flight firmware does this first, before step 1; see Boot-Time Pin Behavior.)
 11. Configure the SPI chip-select pins as outputs.
 12. Configure GPIO27 as input.
 13. Put the chip-select pins high by default.
@@ -237,7 +237,21 @@ At boot, the firmware intentionally forces the following outputs low:
 - GPIO2 low
 - GPIO3 low
 
-This is done immediately after the console banner, before other peripheral initialization, so those outputs do not float or accidentally activate.
+In the flight firmware this is the very first thing `setup()` does, before the serial wait, OTP access and sensor setup, so those outputs do not float or accidentally activate. Before the firmware runs, the RP2350 pads default to inputs with pull-downs; the pyro MOSFET gate should still have its own external pull-down resistor.
+
+## Flight Safety Rules
+
+The flight logic in [src/main.cpp](src/main.cpp) (`updateFlightStateFromSamples`) follows these rules. Change them only deliberately and re-test (ground test plus toss test).
+
+- **Pyro gates** (`tryApogeePyro`): never before apogee; only with `FIRE_PYRO_APOGEE=TRUE`; only with a barometer reading accepted in the same sample; only if the peak is at least `MIN_PYRO_FIRE_HEIGHT_M` above the launch altitude. A barometer glitch at apogee may retry for `PYRO_RETRY_WINDOW_MS` (1 s).
+- **False launch** (`abortFalseLaunch`): a launch that comes to rest (landing confirmation or landing timeout) in `Boost`/`Coast`, before any apogee, with a reliable barometer and less than `FALSE_LAUNCH_MAX_CLIMB_M` (3 m) of climb, returns to `Idle`. The RAM log is discarded and the flight number reused. This is the only path from `Boost`/`Coast` back to `Idle`, and the pyro cannot have fired on it.
+- **Apogee triggers:** `velocity` and `drop` (confirmed over 2-3 samples) and `peak_hold` all require free fall on the IMU (≤ 0.5 g) or, without the IMU, a barometric descent of at least 1 m/s. `baro_descent` is the fallback for a rocket whose IMU never reads free fall: peak climb rate ≥ 10 m/s, IMU below the launch threshold (not under thrust), descent ≥ 3 m/s and ≥ 2 m below the peak, for 3 samples.
+- **Peak altitude** is updated only from barometer readings accepted in that sample, never from the extrapolated estimate during a dropout.
+- **Landing timeout** runs even when both sensors have failed, so the log is always saved.
+- **No flash writes while the USB drive is attached:** `persistDeviceProfile`, `ensureUsbInfoFiles` and the log writer return early while `usbDriveReady` is set. `Settings.ini` is written once per boot: before the drive is exported in USB mode, or at the end of `setup()` in flight mode.
+- **USB exit commands** (`FLIGHT`, `EXITUSB`, `ARM`) and the eject callback act only in `UsbMode`. `powerMode` is re-measured every sample and can read "USB" on a sagging battery, so it is not used for this decision.
+- **SPI:** `beginTransaction()` comes before chip select low, and chip select goes high before `endTransaction()`. The barometer uses SPI mode 0 and the IMU mode 3; switching modes with a chip already selected would give it a stray clock edge.
+- **No watchdog** on purpose: after a reset in flight the board cannot calibrate (it is moving) and goes to `Fault`, so a watchdog would not restore deployment and would add a new failure mode during long blocking work (calibration, saving a long log).
 
 ## Test Functions
 
@@ -390,23 +404,41 @@ Critical overrides warning behavior in LED selection.
 
 ## LED Behavior
 
-The WS2812 LED is the user-visible health indicator.
+The WS2812 LED is the user-visible state indicator. In the flight firmware it is updated every 25 ms by `updateStatusLed()`, and the colours are defined in `setLedProfile()` in [src/main.cpp](src/main.cpp).
 
 ### States
 
-- Busy: white during boot hold period
-- Healthy: green
-- Warning: orange
-- Critical: red
+Each state has its own colour; boot, USB and fault colours are never reused. Breathing means waiting on the ground, solid means in flight, blinking means it needs attention.
+
+| Flight state | `LedProfile` | Colour (R,G,B) | Pattern |
+| --- | --- | --- | --- |
+| Booting (and the first 2 s) | `Boot` | white (255,255,255) | breathing, 2 s |
+| UsbMode | `Usb` | blue (0,128,255) | breathing |
+| Calibrating | `Calibrating` | yellow (255,255,0) | blink 250/250 ms |
+| Idle (and the unused Armed) | `Idle` | green (0,255,0) | breathing |
+| Boost | `Boost` | orange (255,80,0) | solid |
+| Coast | `Coast` | purple (160,0,255) | solid |
+| Descent | `Descent` | cyan (0,255,255) | solid |
+| Landed | `Landed` | magenta (255,0,255) | blink 200/200 ms |
+| Fault | `Fault` | red | blink 150/150 ms |
+
+Global brightness is 40/255.
 
 ### State selection
 
-The LED is updated by `updateHealthLed()`:
+1. If `critical`, a low-battery fault or a sensor fault is latched, blink red (100 ms), whatever the state.
+2. Else, during the first 2 s after boot, show `Boot`.
+3. Else show the colour of the current flight state.
 
-1. If the boot-white timer is still active, show Busy.
-2. Else if critical, show Critical.
-3. Else if warning, show Warning.
-4. Else show Healthy.
+## Serial Commands
+
+| Command | Allowed in | Effect |
+| --- | --- | --- |
+| `DUMP_HEALTH` | any state | Prints health flags (also read by the upload script). |
+| `DUMP_OTP` | any state | Prints the OTP identity. |
+| `FLIGHT` / `EXITUSB` / `ARM` | `UsbMode` | Detaches the drive, remounts, reloads `Settings.ini`, calibrates, goes to `Idle`. |
+| `PYROTEST` (twice within 5 s) | `Idle`, before launch | 1 s pyro pulse; does not latch the flight pyro. |
+| `GYROTEST` | `Idle`, before launch | For 10 s integrates the bias-corrected gyro (`updateGyroTest`) and prints the total angle per axis. A 90° turn must read about ±90. Read-only; cancelled when the board leaves `Idle`. |
 
 ## Serial Output
 

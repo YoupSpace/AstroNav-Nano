@@ -128,13 +128,35 @@ The firmware moves through controlled states rather than jumping directly to out
 2. **USB mode:** the drive is available for configuration and log access.
 3. **Calibrating:** the board must remain still while it establishes gravity, gyro bias, and baseline pressure.
 4. **Idle:** the board is ready and waiting for launch conditions.
-5. **Boost:** sustained acceleration indicates launch and powered ascent.
+5. **Boost:** sustained acceleration indicates launch and powered ascent. If this was only a bump while handling (the board comes to rest without climbing 3 m), it returns to **Idle** and stays ready for the real launch.
 6. **Coast:** boost has ended and the vehicle is still in flight.
 7. **Descent:** apogee was detected. This state is always entered at apogee, also when the pyro is disabled or blocked; whether the pyro fired is shown in the log's `pyro` column and `PYRO_BLOCKED_REASON`.
 8. **Landed:** the vehicle has remained settled long enough to confirm landing.
 9. **Fault:** a critical issue has latched the system safe and disables the pyro output.
 
-The status LED communicates broad conditions. Startup is busy/white, calibration has its own status, USB and idle modes have distinct idle indications, and a fault is red and blinking rapidly. Always use the USB debug snapshot and serial output to investigate a warning; do not infer detailed health from the LED alone.
+The status LED shows one colour per state. Breathing means waiting on the ground, solid means in flight, and blinking means it needs your attention:
+
+| State | LED |
+| --- | --- |
+| Booting | white, breathing (about 2 s) |
+| USB mode | blue, breathing |
+| Calibrating | yellow, blinking: keep the board still |
+| Idle (ready for launch) | green, breathing |
+| Boost | orange, solid |
+| Coast | purple, solid |
+| Descent (after apogee) | cyan, solid |
+| Landed | magenta, blinking |
+| Fault, low battery or sensor fault | red, fast blinking |
+
+Typical sequences:
+
+- **Power-up on battery:** white → yellow → green.
+- **Power-up on USB:** white → blue. After ejecting the drive: yellow → green.
+- **Flight:** green → orange → purple → cyan → magenta.
+- **Bump on the pad (false launch):** green → orange → purple → green. The bump was taken as a launch (orange), the board saw the "motor" stop (purple), then returned to `Idle` because it never climbed. Nothing is written to `/logs`.
+- **Magenta on the pad without a flight:** the board was carried 3 m or more after a bump. Power-cycle it and let it calibrate again.
+
+Always use the USB debug snapshot and serial output to investigate a warning; do not infer detailed health from the LED alone.
 
 ## 7. Pre-flight procedure
 
@@ -168,14 +190,18 @@ During flight the board samples sensors on a regular schedule and estimates alti
 
 Launch requires sustained acceleration above the configured threshold. Between launch and landing the board does not write to flash, so nothing can stall the sensor loop during the flight.
 
-During boost and coast, apogee requires a trustworthy barometer, free fall on the IMU (or a real barometric descent when the IMU is unavailable), and a minimum flight time. It triggers when the climb has stopped (velocity) or, as a backup, when the drop from the peak is clearly larger than noise. Confirmation samples are required rather than acting on one noisy reading. Physically impossible barometer jumps (for example a pressure spike from the ejection charge) are rejected before they reach the altitude estimate.
+A knock while handling the rocket (sliding it onto the rail, setting it down hard) can look like a launch. If the board then comes to rest before any apogee and the barometer shows it never climbed 3 m, it treats this as a false launch: it discards that recording, returns to `Idle` and keeps the flight number, so the real launch is detected and the pyro is still available. The serial log shows `[FLIGHT] False launch`. This needs a working barometer; carrying the rocket up 3 m or more (stairs, a hill) after a false launch still ends in `Landed`, so if the LED blinks magenta (landed) on the pad, power-cycle the board and let it calibrate again.
+
+During boost and coast, apogee requires a trustworthy barometer, free fall on the IMU (or a real barometric descent when the IMU is unavailable), and a minimum flight time. It triggers when the climb has stopped (velocity) or, as a backup, when the drop from the peak is clearly larger than noise. Confirmation samples are required rather than acting on one noisy reading. Physically impossible barometer jumps (for example a pressure spike from the ejection charge) are rejected before they reach the altitude estimate. The peak altitude is only taken from accepted barometer readings, never from the estimate during a barometer dropout.
+
+If the IMU never reads free fall (a tumbling or fast-spinning rocket, or a board mounted far from the centre of gravity), a fallback still declares apogee: the rocket first climbed at more than 10 m/s, it is no longer under thrust, and the barometer shows a steady descent of at least 3 m/s and at least 2 m below the peak. This deploys a little later than a normal apogee (`APOGEE_TRIGGER=baro_descent` in the log), which is safer than no deployment at all.
 
 When apogee is confirmed the board enters `Descent`, and:
 
 - with `FIRE_PYRO_APOGEE=TRUE`, the pyro output receives a one-second pulse if the barometer is reliable and the peak is at least `MIN_PYRO_FIRE_HEIGHT_M` above the launch point;
 - with `FIRE_PYRO_APOGEE=FALSE`, the event is logged but the output is not fired.
 
-`Landed` is declared when one sensor is completely calm and the other shows at most minimal movement (for example wind rocking). A rocket still swinging, for example in a tree, keeps waiting until it settles. A timeout that scales with the real peak height guarantees the log is always saved. The flight log header records what the board decided: `DETECTED_APOGEE_M`, `APOGEE_TRIGGER`, `PYRO_BLOCKED_REASON`, `LANDING_TRIGGER`, `BARO_REJECTED_SAMPLES` and `SAMPLE_GAPS`.
+`Landed` is declared when one sensor is completely calm and the other shows at most minimal movement (for example wind rocking). A rocket still swinging, for example in a tree, keeps waiting until it settles. A timeout that scales with the real peak height guarantees the log is always saved, also when both sensors have failed. The flight log header records what the board decided: `DETECTED_APOGEE_M`, `APOGEE_TRIGGER`, `PYRO_BLOCKED_REASON`, `LANDING_TRIGGER`, `BARO_REJECTED_SAMPLES` and `SAMPLE_GAPS`.
 
 Sensor fallback can allow healthy sensor paths to continue supporting state logic when another reading is invalid, but fallback behavior is not a reason to ignore warnings or continue an unsafe operation.
 
@@ -189,7 +215,7 @@ When the board is powered by USB:
 2. Use Windows **Safely Remove Hardware / Eject**.
 3. Wait for the board to leave storage mode before changing power or wiring.
 
-The alternative `EXITUSB` serial command can request the same transition. Never unplug during an active write when a safe eject is available.
+The alternative `EXITUSB` serial command can request the same transition. It is only accepted while the board is in USB storage mode; in `Idle` or during a flight it is ignored. Never unplug during an active write when a safe eject is available.
 
 After the eject the drive disappears, the board reloads `Settings.ini` (including any edits you made) and calibrates; keep it still. The USB serial port stays available in flight mode, so `DUMP_HEALTH` and the ground `PYROTEST` keep working while USB-powered.
 
@@ -218,8 +244,18 @@ The log includes a sample counter and time in milliseconds, power mode, flight s
 | Serial health monitoring | Advanced / Pro (optional) | Helps diagnose power, sensor, storage, and state behavior. | Use 115200 baud and keep hazardous outputs disconnected. |
 | `FIRE_PYRO_APOGEE=FALSE` detection-only tests | Pro (optional) | Tests detection and logging without automatic apogee output. | Still treat the board as energized and verify the physical circuit. |
 | `PYROTEST` | Dangerous test | Bench verification of the pyro output path. | Never connect live hardware. Send `PYROTEST` twice within five seconds; the output pulse is limited to one second. |
+| `GYROTEST` | Advanced | Checks that the gyro reports the right rotation. | Read-only: does not touch the pyro or the flight logic. |
 
 `PYROTEST` is a ground-only test: it is accepted only in `Idle` (flight mode, calibrated, before any launch), never in USB storage mode and never during or after a flight. It does not use up the flight pyro, so after replacing the igniter the board can still deploy on the next flight without a reboot. It is deliberately not part of the normal beginner workflow.
+
+`GYROTEST` checks the gyro scale. It works only in `Idle` in flight mode (on battery, or on USB power after `FLIGHT`/`EXITUSB` or ejecting the drive), because it uses the gyro bias from the pad calibration.
+
+1. Lay the board flat on the table against a straight edge, such as a ruler or the table edge, and let it reach `Idle`.
+2. Send `GYROTEST` over serial (115200 baud).
+3. Within 10 seconds, slowly turn the board flat on the table by exactly 90° (to the next edge or a square corner), then hold it still.
+4. After 10 seconds the board prints `[GYROTEST] Result: x=... y=... z=... deg`. The axis you turned around (normally `z` for a flat turn) should read about ±90; the other two stay near 0.
+
+The total angle does not depend on how fast you turn. A reading of about 45 or about 180 means the gyro scale is wrong; do not fly and report it. The test stops early, with a `Cancelled` message, if the board leaves `Idle`, for example when a rough movement is taken as a launch.
 
 ## 11. Troubleshooting
 

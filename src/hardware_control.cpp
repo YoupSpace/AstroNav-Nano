@@ -12,7 +12,9 @@ extern void updateStatusLed();
 extern void appendMissionSample();
 
 static constexpr float ACCEL_LSB_PER_G = 1024.0f;
-static constexpr float GYRO_LSB_PER_DPS = 16.4f;
+// GYRO_CONFIG0 = 0x06 selects GYRO_UI_FS_SEL = 0 = +-4000 dps: 32768 / 4000 = 8.2 LSB per dps.
+// (Same encoding as ACCEL_CONFIG0 = 0x06 -> +-32 g -> 1024 LSB per g above.)
+static constexpr float GYRO_LSB_PER_DPS = 8.2f;
 static constexpr float ADC_VREF = 3.3f;
 static constexpr float ADC_COUNTS = 4095.0f;
 static constexpr float VIN_DIVIDER_TOP_OHMS = 20000.0f;
@@ -88,14 +90,16 @@ bool readImuFrame(float &ax, float &ay, float &az, float &gx, float &gy, float &
   uint8_t rawData[12] = {0};
 
   for (int attempt = 0; attempt < 4; attempt++) {
-    digitalWrite(PIN_CS_IMU, LOW);
+    // Set the SPI mode before selecting the chip: the barometer uses mode 0 and the IMU
+    // mode 3, so switching with CS already low would give the IMU a stray clock edge.
     SPI.beginTransaction(spiSettings);
+    digitalWrite(PIN_CS_IMU, LOW);
     SPI.transfer(ICM_REG_ACCEL_DATA_X1_UI | 0x80);
     for (int i = 0; i < 12; i++) {
       rawData[i] = SPI.transfer(0x00);
     }
-    SPI.endTransaction();
     digitalWrite(PIN_CS_IMU, HIGH);
+    SPI.endTransaction();
 
     bool allZero = true;
     bool allFF = true;
@@ -324,12 +328,12 @@ void recordFaultAndSafeStop() {
 
 uint8_t readRegister(uint8_t csPin, uint8_t regAddr, SPISettings settings) {
   uint8_t value = 0;
+  SPI.beginTransaction(settings);   // mode first, then CS (see readImuFrame)
   digitalWrite(csPin, LOW);
-  SPI.beginTransaction(settings);
   SPI.transfer(regAddr | 0x80);
   value = SPI.transfer(0x00);
-  SPI.endTransaction();
   digitalWrite(csPin, HIGH);
+  SPI.endTransaction();
   return value;
 }
 
@@ -338,12 +342,12 @@ uint8_t readRegister(uint8_t csPin, uint8_t regAddr) {
 }
 
 void writeRegister(uint8_t csPin, uint8_t regAddr, uint8_t value, SPISettings settings) {
+  SPI.beginTransaction(settings);   // mode first, then CS (see readImuFrame)
   digitalWrite(csPin, LOW);
-  SPI.beginTransaction(settings);
   SPI.transfer(regAddr & 0x7F);
   SPI.transfer(value);
-  SPI.endTransaction();
   digitalWrite(csPin, HIGH);
+  SPI.endTransaction();
 }
 
 void writeRegister(uint8_t csPin, uint8_t regAddr, uint8_t value) {

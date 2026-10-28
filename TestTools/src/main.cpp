@@ -39,7 +39,9 @@
 
 // The current register stream maps the stationary 1 g vector to about half scale.
 static constexpr float ACCEL_LSB_PER_G = 1024.0f;
-static constexpr float GYRO_LSB_PER_DPS = 16.4f;
+// GYRO_CONFIG0 = 0x06 selects +-4000 dps (same code 0 as the +-32 g accel range above):
+// 32768 / 4000 = 8.2 LSB per dps. Matches the flight firmware.
+static constexpr float GYRO_LSB_PER_DPS = 8.2f;
 static constexpr float ADC_VREF = 3.3f;
 static constexpr float ADC_COUNTS = 4095.0f;
 static constexpr float VIN_DIVIDER_TOP_OHMS = 20000.0f;

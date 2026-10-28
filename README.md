@@ -35,8 +35,13 @@ In this repository:
 
 `Idle` → `Boost` → `Coast` → `Descent` (apogee) → `Landed`
 
-- **Apogee** needs a trustworthy barometer and free fall on the IMU. Physically impossible
-  pressure jumps, such as the ejection charge's pressure spike, are filtered out.
+- **A bump is not a flight.** If a "launch" comes to rest without climbing 3 m, the board
+  returns to `Idle` and stays ready for the real launch. The LED then goes orange → purple →
+  green within a few seconds, and nothing is written to `/logs`.
+- **Apogee** needs a trustworthy barometer and free fall on the IMU. If the IMU never reads
+  free fall (tumbling or spinning rocket), a clear barometer descent after a real climb still
+  triggers apogee, slightly later. Physically impossible pressure jumps, such as the ejection
+  charge's pressure spike, are filtered out.
 - **The pyro** fires at apogee only if the barometer is reliable and the rocket climbed at least
   `MIN_PYRO_FIRE_HEIGHT_M` above the launch point (default 5 m). That protects people
   handling an armed board.
@@ -48,6 +53,31 @@ In this repository:
 
 The `ESTIMATED_*` settings are a baseline: good estimates make the board react faster and more
 precisely, but they never block an event. See [Configuration](https://wiki.youpspace.com/configuration/).
+
+## Status LED
+
+Breathing = waiting on the ground, solid = in flight, blinking = needs your attention.
+
+| State | LED |
+| --- | --- |
+| Booting | white, breathing (about 2 s) |
+| USB mode | blue, breathing |
+| Calibrating | yellow, blinking: keep the board still |
+| Idle (ready for launch) | green, breathing |
+| Boost | orange, solid |
+| Coast | purple, solid |
+| Descent (after apogee) | cyan, solid |
+| Landed | magenta, blinking |
+| Fault, low battery or sensor fault | red, fast blinking |
+
+Typical sequences:
+
+- **Power-up on battery:** white → yellow → green.
+- **Power-up on USB:** white → blue. After ejecting the drive: yellow → green.
+- **Flight:** green → orange → purple → cyan → magenta.
+- **Bump on the pad (false launch):** green → orange → purple → green.
+- **Magenta on the pad without a flight:** the board was carried 3 m or more after a bump.
+  Power-cycle it and let it calibrate again.
 
 ## Build and upload
 

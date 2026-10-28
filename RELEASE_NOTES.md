@@ -1,3 +1,42 @@
+# AstroNav Nano Firmware v1.2.2
+
+Safety release from a full review of v1.2.1. Updating does not erase your logs or settings. Do a ground test and a toss test before flying.
+
+## Safety
+
+- **A bump on the pad no longer disarms the parachute.** Previously a knock while handling the rocket (sliding it onto the rail, setting it down hard) could be taken as a launch. The board then declared `Landed` a few seconds later, ignored the real launch and never fired the pyro. Now a "launch" that comes to rest without climbing 3 m returns to `Idle`, and the board stays ready for the real flight. The LED goes orange → purple → green, and the serial log shows `[FLIGHT] False launch`.
+- **Backup apogee for tumbling or spinning rockets.** Apogee required the IMU to read free fall. A rocket whose IMU never reads free fall (tumbling, fast spin, board far from the centre of gravity) never deployed. A new fallback declares apogee on a clear barometer descent (≥ 3 m/s, ≥ 2 m below the peak), only after a real powered climb (≥ 10 m/s) and not under thrust. The log shows `APOGEE_TRIGGER=baro_descent`.
+- **No early apogee after a barometer dropout.** The peak altitude was also taken from the estimate while barometer readings were missing. That estimate overshoots while the rocket slows down, which could trigger apogee while still climbing. The peak now only uses real barometer readings.
+- **Pyro output driven low first thing at boot**, before the serial wait and OTP access (up to 1.5 s earlier than before).
+- **USB exit commands only in USB mode.** `FLIGHT`, `EXITUSB` and `ARM` were accepted whenever the battery voltage happened to read in the USB range (a sagging 2S, or a 1S LiPo with a USB cable). That re-ran the remount and calibration, and could stall the loop or end in `Fault` on the pad or in flight. They now only work in USB storage mode.
+
+## Fixes
+
+- **`Settings.ini` was still written while the USB drive was attached.** At the end of startup, the board rewrote `Settings.ini` after the drive had already been shown to the computer. This is the simultaneous-access problem v1.2.1 set out to fix. Writes are now blocked while the drive is attached, and `Settings.ini` is written once per boot instead of up to three times.
+- **Gyro values were half the real rotation rate.** The IMU is set to ±4000 °/s, but the firmware converted the values as if it were ±2000 °/s. Landing and calibration stillness checks are now as strict as intended, and logged gyro values are correct; they saturate at ±3276.7 °/s in the log.
+- **SPI order.** The IMU is selected only after the SPI bus is switched to its mode. Before, it could see a stray clock edge after a barometer transfer.
+- **Landing timeout with failed sensors.** If both sensors failed during a flight, the landing timeout never ran and the log was never saved. It now runs regardless.
+- **TestTools** uses the corrected gyro scale too.
+
+## Changes
+
+- **New status LED colours.** Each state has its own colour, and `Idle` and `Landed` no longer look alike. Breathing means waiting on the ground, solid means in flight, blinking means it needs attention:
+  - **Idle:** green, breathing (was green-teal)
+  - **Boost:** orange, solid
+  - **Coast:** purple, solid
+  - **Descent:** cyan, solid (was pink)
+  - **Landed:** magenta, blinking (was teal)
+
+  Boot (white), USB (blue), calibrating (yellow, blinking) and fault (red) are unchanged.
+- **New `GYROTEST` serial command** (`Idle` in flight mode only, read-only). Turn the board 90° flat on the table within 10 s; the board prints the total angle per axis, which should be about ±90.
+
+## Before you fly
+
+- Run `GYROTEST` once: a 90° turn should read about ±90 (not 45 or 180).
+- Check that the pyro MOSFET gate has an external pull-down resistor.
+
+---
+
 # AstroNav Nano Firmware v1.2.1
 
 Bug-fix release for leaving USB mode. Updating from v1.2.0 does not erase your logs or settings.
