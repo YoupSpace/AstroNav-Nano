@@ -1,4 +1,6 @@
-# Unreleased
+# AstroNav Nano Firmware v1.2.3
+
+Flight logs now save the flight estimates they flew with. Updating does not erase your logs or settings.
 
 ## Flight logs
 
