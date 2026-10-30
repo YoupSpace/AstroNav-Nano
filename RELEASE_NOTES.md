@@ -1,3 +1,11 @@
+# AstroNav Nano Firmware v1.2.3
+
+Flight logs now save the flight estimates they flew with. Updating does not erase your logs or settings.
+
+## Flight logs
+
+- **Flight-estimate settings in the log header:** `ESTIMATED_HEIGHT_M`, `HEIGHT_MARGIN_M`, `ESTIMATED_SPEED_MPS` and `SPEED_MARGIN_MPS`, the values this flight used. Mission Control shows them with the flight and compares them with how it really flew.
+
 # AstroNav Nano Firmware v1.2.2
 
 Safety release from a full review of v1.2.1. Updating does not erase your logs or settings. Do a ground test and a toss test before flying.

@@ -1846,6 +1846,11 @@ void writeLogHeader(File &logFile, bool summaryIsFinal, const MissionLogSummary 
     logFile.println("# Samples: long flight, see the FINAL_ lines at the end of this file");
   }
   writeLogSummaryLines(logFile, "", summary);
+  // The estimates this flight used, named as in Settings.ini so they can be copied back.
+  logFile.printf("# ESTIMATED_HEIGHT_M=%.2f\n", flightSettings.estimatedHeightM);
+  logFile.printf("# HEIGHT_MARGIN_M=%.2f\n", flightSettings.heightMarginM);
+  logFile.printf("# ESTIMATED_SPEED_MPS=%.2f\n", flightSettings.estimatedSpeedMps);
+  logFile.printf("# SPEED_MARGIN_MPS=%.2f\n", flightSettings.speedMarginMps);
   logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;battery_v;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits;baro_rejected");
 }
 
