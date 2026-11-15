@@ -17,6 +17,7 @@ Safety release from a full review of v1.2.1. Updating does not erase your logs o
 - **SPI order.** The IMU is selected only after the SPI bus is switched to its mode. Before, it could see a stray clock edge after a barometer transfer.
 - **Landing timeout with failed sensors.** If both sensors failed during a flight, the landing timeout never ran and the log was never saved. It now runs regardless.
 - **TestTools** uses the corrected gyro scale too.
+- **No more false low-battery alarms.** One low reading was enough to latch the red LED, so the current spike of the pyro firing (or `PYROTEST`) could leave the board red after landing. The battery now has to stay below the limit (1S ≤ 3.5 V, 2S ≤ 7.0 V) for 3 seconds, and readings during and just after a pyro pulse are ignored. The warning stays a warning: launch, apogee and pyro keep working whatever the battery does.
 
 ## Changes
 
@@ -28,6 +29,7 @@ Safety release from a full review of v1.2.1. Updating does not erase your logs o
   - **Landed:** magenta, blinking (was teal)
 
   Boot (white), USB (blue), calibrating (yellow, blinking) and fault (red) are unchanged.
+- **Lowest battery voltage is recorded.** New log header lines `MIN_BATTERY_V` (lowest since power-on, without the pyro dip), `PYRO_MIN_BATTERY_V` (lowest during a pyro pulse, `PYROTEST` included: shows whether the battery could deliver the firing current) and `LOW_BATTERY` (`YES`/`NO`). The same values appear in `Settings.ini` and on a new `[HEALTH] low_battery=... min_battery_mv=... pyro_min_battery_mv=...` line in `DUMP_HEALTH`. The pyro dip is recorded but never raises an alarm, and a low battery never stops the pyro from firing.
 - **New `GYROTEST` serial command** (`Idle` in flight mode only, read-only). Turn the board 90° flat on the table within 10 s; the board prints the total angle per axis, which should be about ±90.
 
 ## Before you fly

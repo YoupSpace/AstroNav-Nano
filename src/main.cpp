@@ -56,6 +56,11 @@ bool isPlaceholderSerial(const char *serialNumber) {
 // Sensor scaling, ADC and calibration constants live in hardware_control.cpp.
 static constexpr float LIPO_1S_LOW_VOLTAGE = 3.5f;
 static constexpr float LIPO_2S_LOW_VOLTAGE = 7.0f;
+// Low-battery warning only after the voltage stayed low this long, so a short dip under
+// load does not raise it. It never blocks launch, apogee or the pyro.
+static constexpr uint32_t LOW_VOLTAGE_CONFIRM_MS = 3000;
+// The pyro pulse pulls the battery down; ignore the voltage during it and shortly after.
+static constexpr uint32_t PYRO_SAG_IGNORE_MS = 1000;
 
 static constexpr uint32_t SAMPLE_PERIOD_MS = 50;
 static constexpr uint32_t LED_PERIOD_MS = 25;
@@ -244,7 +249,12 @@ bool missionLogFlushed = false;
 bool pyroLatched = false;
 bool missionStarted = false;
 bool flightRecordsPendingSave = false;
-bool lowVoltageFault = false;
+bool lowVoltageFault = false;   // latched low-battery warning (LED only)
+uint32_t lowVoltageSinceMs = 0;   // 0 = voltage currently above the limit
+float minBatteryVoltage = 0.0f;   // lowest battery reading since boot, outside pyro pulses; 0 = none yet
+// Lowest battery reading during a pyro pulse (and PYRO_SAG_IGNORE_MS after it), since boot,
+// PYROTEST included. Recorded only: the dip is expected and never raises an alarm.
+float pyroMinBatteryVoltage = 0.0f;   // 0 = no pulse on battery yet
 bool sensorFault = false;
 
 uint32_t bootMs = 0;
@@ -1170,6 +1180,9 @@ void persistDeviceProfile() {
                                   runtimeModeText(),
                                   stateText(flightState),
                                   powerModeText(powerMode));
+  infoFile.printf("LOW_BATTERY=%s\n", lowVoltageFault ? "TRUE" : "FALSE");
+  infoFile.printf("MIN_BATTERY_V=%.2f\n", minBatteryVoltage);
+  infoFile.printf("PYRO_MIN_BATTERY_V=%.2f\n", pyroMinBatteryVoltage);
   Serial.println("[BOOT] stage=persist_debug_write_complete");
   infoFile.println();
   infoFile.println("[storage]");
@@ -1223,6 +1236,44 @@ bool isLiPoVoltageTooLow() {
     return currentVinVoltage <= LIPO_2S_LOW_VOLTAGE;
   }
   return false;
+}
+
+// Warning only: the flight logic keeps running whatever the battery does.
+void updateLowBatteryWarning(uint32_t now) {
+  bool batteryPowered = detectedBatteryMode == PowerMode::LiPo1S || detectedBatteryMode == PowerMode::LiPo2S;
+  // Covers the pulse itself (pyroPulseUntilMs in the future) and PYRO_SAG_IGNORE_MS after it.
+  // pyroPulseUntilMs is 0 until the first pulse, so the first second after boot is not a pulse.
+  bool pyroSag = pyroPulseUntilMs != 0 &&
+                 static_cast<int32_t>(now - pyroPulseUntilMs) < static_cast<int32_t>(PYRO_SAG_IGNORE_MS);
+  if (!batteryPowered) {
+    lowVoltageSinceMs = 0;
+    return;
+  }
+  if (pyroSag) {
+    if (pyroMinBatteryVoltage == 0.0f || currentVinVoltage < pyroMinBatteryVoltage) {
+      pyroMinBatteryVoltage = currentVinVoltage;
+    }
+    lowVoltageSinceMs = 0;   // the dip is expected: never part of the low-battery alarm
+    return;
+  }
+
+  if (minBatteryVoltage == 0.0f || currentVinVoltage < minBatteryVoltage) {
+    minBatteryVoltage = currentVinVoltage;
+  }
+
+  if (!isLiPoVoltageTooLow()) {
+    lowVoltageSinceMs = 0;
+    return;
+  }
+  if (lowVoltageSinceMs == 0) {
+    lowVoltageSinceMs = (now == 0) ? 1 : now;
+  } else if (!lowVoltageFault && now - lowVoltageSinceMs >= LOW_VOLTAGE_CONFIRM_MS) {
+    lowVoltageFault = true;
+    boardHealth.warning = true;
+    Serial.printf("[POWER] Low battery: %.2f V for %lu s (state=%s). Flight logic keeps running.\n",
+                  currentVinVoltage, static_cast<unsigned long>(LOW_VOLTAGE_CONFIRM_MS / 1000),
+                  stateText(flightState));
+  }
 }
 
 void recordSensorResult(bool success, bool &sensorOk, uint8_t &failureCount, uint32_t &windowStartMs) {
@@ -1719,6 +1770,10 @@ void handleSerialCommand(const char *command) {
                   boardHealth.warning ? "YES" : "NO",
                   boardHealth.critical ? "YES" : "NO",
                   static_cast<unsigned int>(healthBits()));
+    Serial.printf("[HEALTH] low_battery=%s min_battery_mv=%ld pyro_min_battery_mv=%ld\n",
+                  lowVoltageFault ? "YES" : "NO",
+                  static_cast<long>(lroundf(minBatteryVoltage * 1000.0f)),
+                  static_cast<long>(lroundf(pyroMinBatteryVoltage * 1000.0f)));
     Serial.printf("[HEALTH] core=%s heap=%s spi=%s imu_whoami=%s imu_config=%s imu_stream=%s baro=%s flash=%s vin=%s\n",
                   boardHealth.coreTickOk ? "OK" : "FAIL",
                   boardHealth.heapOk ? "OK" : "FAIL",
@@ -1810,6 +1865,18 @@ void writeLogSummaryLines(File &logFile, const char *prefix, const MissionLogSum
   logFile.printf("# %sMAX_SPEED_MPS=%.2f\n", prefix, summary.maxSpeedMps);
   logFile.printf("# %sMAX_ACCEL_G=%.2f\n", prefix, summary.maxAccelG);
   logFile.printf("# %sMAX_BATTERY_V=%.2f\n", prefix, summary.maxBatteryV);
+  // Since power-on, not counting the pyro pulse dip; "none" when not on a LiPo.
+  if (minBatteryVoltage > 0.0f) {
+    logFile.printf("# %sMIN_BATTERY_V=%.2f\n", prefix, minBatteryVoltage);
+  } else {
+    logFile.printf("# %sMIN_BATTERY_V=none\n", prefix);
+  }
+  logFile.printf("# %sLOW_BATTERY=%s\n", prefix, lowVoltageFault ? "YES" : "NO");
+  if (pyroMinBatteryVoltage > 0.0f) {
+    logFile.printf("# %sPYRO_MIN_BATTERY_V=%.2f\n", prefix, pyroMinBatteryVoltage);
+  } else {
+    logFile.printf("# %sPYRO_MIN_BATTERY_V=none\n", prefix);
+  }
   logFile.printf("# %sESTIMATED_APOGEE_DROP_M=%.2f\n", prefix, flightApogeeDropM);
   float actualDropM = fmaxf(0.0f, summary.maxAltitudeM - summary.lastAltitudeM);
   logFile.printf("# %sACTUAL_APOGEE_DROP_M=%.2f\n", prefix, actualDropM);
@@ -2745,10 +2812,7 @@ void loop() {
       boardHealth.warning = true;
     }
 
-    if (isLiPoVoltageTooLow()) {
-      boardHealth.warning = true;
-      lowVoltageFault = true;
-    }
+    updateLowBatteryWarning(now);
 
     float ax = 0.0f;
     float ay = 0.0f;

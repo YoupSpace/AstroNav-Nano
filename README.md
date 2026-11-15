@@ -68,7 +68,7 @@ Breathing = waiting on the ground, solid = in flight, blinking = needs your atte
 | Coast | purple, solid |
 | Descent (after apogee) | cyan, solid |
 | Landed | magenta, blinking |
-| Fault, low battery or sensor fault | red, fast blinking |
+| Fault (pyro off), or low battery / sensor warning (still armed) | red, fast blinking |
 
 Typical sequences:
 

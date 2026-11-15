@@ -90,7 +90,7 @@ The firmware treats this reading as the board input rail before the regulator. I
 
 The measured input rail is classified into one of three expected power sources:
 
-- USB power: 4.5 V to 5.5 V
+- USB power: 4.4 V to 5.5 V
 - 1S LiPo: 3.0 V to 4.35 V
 - 2S LiPo: 6.0 V to 8.4 V
 
@@ -251,6 +251,7 @@ The flight logic in [src/main.cpp](src/main.cpp) (`updateFlightStateFromSamples`
 - **No flash writes while the USB drive is attached:** `persistDeviceProfile`, `ensureUsbInfoFiles` and the log writer return early while `usbDriveReady` is set. `Settings.ini` is written once per boot: before the drive is exported in USB mode, or at the end of `setup()` in flight mode.
 - **USB exit commands** (`FLIGHT`, `EXITUSB`, `ARM`) and the eject callback act only in `UsbMode`. `powerMode` is re-measured every sample and can read "USB" on a sagging battery, so it is not used for this decision.
 - **SPI:** `beginTransaction()` comes before chip select low, and chip select goes high before `endTransaction()`. The barometer uses SPI mode 0 and the IMU mode 3; switching modes with a chip already selected would give it a stray clock edge.
+- **Low battery is a warning, never a block** (`updateLowBatteryWarning`): on a LiPo detected at boot, the voltage must stay at or below 3.5 V (1S) / 7.0 V (2S) for `LOW_VOLTAGE_CONFIRM_MS` (3 s) before the red LED latches. Readings during a pyro pulse and `PYRO_SAG_IGNORE_MS` (1 s) after it never count for the alarm or `MIN_BATTERY_V`; they are recorded separately as `PYRO_MIN_BATTERY_V`. Launch, apogee and pyro are never affected: the pyro path has no voltage check, so on a low battery it still tries to fire.
 - **No watchdog** on purpose: after a reset in flight the board cannot calibrate (it is moving) and goes to `Fault`, so a watchdog would not restore deployment and would add a new failure mode during long blocking work (calibration, saving a long log).
 
 ## Test Functions
@@ -306,7 +307,7 @@ The corresponding source label is stored in `currentPowerSource`.
 
 The measured input voltage is mapped to a source label:
 
-- 4.5 V to 5.5 V -> `USB power`
+- 4.4 V to 5.5 V -> `USB power`
 - 3.0 V to 4.35 V -> `1S LiPo`
 - 6.0 V to 8.4 V -> `2S LiPo`
 - otherwise -> `Unknown`

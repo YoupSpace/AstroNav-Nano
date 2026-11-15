@@ -146,7 +146,7 @@ The status LED shows one colour per state. Breathing means waiting on the ground
 | Coast | purple, solid |
 | Descent (after apogee) | cyan, solid |
 | Landed | magenta, blinking |
-| Fault, low battery or sensor fault | red, fast blinking |
+| Fault (pyro off), or low battery / sensor warning (still armed) | red, fast blinking |
 
 Typical sequences:
 
@@ -269,7 +269,7 @@ The total angle does not depend on how fast you turn. A reading of about 45 or a
 
 ### The board reports an unknown power source
 
-Check battery voltage, polarity, wiring, and the voltage-sense path. Supported classifications are USB 4.5-5.5 V, 1S LiPo 3.0-4.35 V, and 2S LiPo 6.0-8.4 V. Do not continue with an unknown source until it is understood.
+Check battery voltage, polarity, wiring, and the voltage-sense path. Supported classifications are USB 4.4-5.5 V, 1S LiPo 3.0-4.35 V, and 2S LiPo 6.0-8.4 V. Do not continue with an unknown source until it is understood.
 
 ### Calibration fails
 
@@ -277,7 +277,12 @@ Place the board on a stable surface, stop vibration, check IMU and barometer con
 
 ### The board is red and blinking
 
-This indicates a latched fault condition. The pyro output is disabled safely. Keep hazardous hardware disconnected, read `FAULT_REASON` and the health checks, and correct the underlying problem before rebooting or retesting.
+Red blinking has two possible causes. Send `DUMP_HEALTH` or read `Settings.ini` to tell them apart:
+
+- **Fault** (`critical=YES`, state `fault`): a latched fault. The pyro output is disabled. Keep hazardous hardware disconnected, read `FAULT_REASON` and the health checks, and correct the underlying problem before rebooting or retesting.
+- **Low battery or sensor warning** (`low_battery=YES`, or a sensor failing repeatedly): the board **keeps running its flight logic and the pyro stays active**. Low battery means the LiPo stayed at or below 3.5 V (1S) or 7.0 V (2S) for 3 seconds. Do not launch: charge or replace the battery and power-cycle the board. The warning stays on until the next power-up. A low battery never stops the pyro: if apogee is reached it still tries to fire.
+
+The flight log, `Settings.ini` and `DUMP_HEALTH` record `MIN_BATTERY_V` (lowest voltage outside pyro pulses) and `PYRO_MIN_BATTERY_V` (lowest voltage while the pyro fires, `PYROTEST` included). The pyro dip is expected and never raises the alarm, but a very low `PYRO_MIN_BATTERY_V` during a `PYROTEST` tells you the battery may not deliver enough current to fire the igniter or may reset the board.
 
 ### The board reboots or freezes after a firmware update
 
