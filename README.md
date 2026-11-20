@@ -1,13 +1,51 @@
-# AstroNav Nano Firmware
+# AstroNav Nano
 
-Firmware for the **AstroNav Nano**, a small RP2350 flight computer for model rockets by
-[YoupSpace](https://youpspace.com/). It detects launch, apogee and landing from an IMU
-and a barometer, fires the deployment charge at apogee, and saves every flight as a CSV log
-you can open over USB.
+**The world's smallest rocket flight computer, as far as we know: 16 × 13.6 mm.**
+
+![AstroNav Nano next to a 2 euro coin](https://image.easyeda.com/oshwhub/pullImage/d6e4ca3b0097472b9137191767315ac6.jpg)
+
+The AstroNav Nano by [YoupSpace](https://youpspace.com/) logs your whole flight, detects
+apogee and fires your parachute charge. It takes up 20% less board area than the previous
+record holder (BPS.space, 17 × 16 mm) and still saves every flight as a CSV log you can open
+over USB.
+
+This repository holds the **firmware**. The hardware design files (schematic, PCB, BOM) and the
+3D printable holder and case are on the
+[OSHWLab project page](https://oshwlab.com/youphoutkamp/project_cafdwlpm).
 
 > **Safety first.** Read the [Safety](https://wiki.youpspace.com/safety/) page before
 > powering, flashing or flying. Keep pyro charges and igniters disconnected while
 > developing and bench testing.
+
+## Specs
+
+| | |
+|---|---|
+| Size | 16 × 13.6 mm |
+| Microcontroller | Raspberry Pi RP2350A |
+| IMU | ICM-45686 (accelerometer + gyroscope, up to 32 G) |
+| Barometer | BMP581 |
+| Power | 1S or 2S LiPo, or 5 V USB, with reverse polarity protection |
+| Power draw | about 0.1 W |
+| Logging | 20 samples/s: acceleration, rotation, temperature, pressure, altitude, vertical speed |
+| Storage | 2 MB flash: about 12 typical 60-second flights |
+| Outputs | 1 pyro channel, 2 RGB status LEDs |
+| Expansion | GPIO 2 and GPIO 3 (UART, I²C, PWM) |
+| USB | Serial and mass storage, no drivers needed |
+
+## The ecosystem
+
+| Part | Where | License |
+|---|---|---|
+| Firmware | This repository | CC BY-NC 4.0 |
+| Hardware design files and 3D printable files | [OSHWLab](https://oshwlab.com/youphoutkamp/project_cafdwlpm) | CC BY-NC 4.0 |
+| User documentation | [wiki.youpspace.com](https://wiki.youpspace.com/) | |
+| AstroNav Mission Control (desktop app for Windows and Linux) | [Releases](https://github.com/YoupSpace/astronav-mc-releases) | Closed source, free to use |
+
+**AstroNav Mission Control** takes you through the whole loop: plan a flight (estimated apogee
+and top speed from your rocket's weight and motor), configure the board safely, update the
+firmware with one click, replay every flight with synchronized charts, compare what you planned
+with what really happened, and export your launch video with a telemetry overlay.
 
 ## Documentation
 
@@ -112,6 +150,14 @@ reproducible builds.
 | [TestTools/](TestTools/) | Separate hardware self-test firmware |
 
 `include/build_info.h` is generated on every build and is not tracked in git.
+
+## License
+
+The firmware, documentation, hardware design files and 3D printable files are licensed under
+[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). You may study, modify and
+share them and build boards for your own use, with credit to YoupSpace. Selling boards, kits
+or derivatives needs written permission. Because of that non-commercial clause, this project is
+source-available, not "open source" by the OSHWA or OSI definition. See [LICENSE](LICENSE).
 
 ## Disclaimer
 

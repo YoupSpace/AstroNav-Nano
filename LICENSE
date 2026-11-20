@@ -1,0 +1,27 @@
+AstroNav Nano
+Copyright (c) 2026 YoupSpace
+
+The AstroNav Nano firmware, documentation, hardware design files and 3D printable
+files are licensed under the Creative Commons Attribution-NonCommercial 4.0
+International License (CC BY-NC 4.0).
+
+To view a copy of this license, visit
+https://creativecommons.org/licenses/by-nc/4.0/
+
+In short:
+
+- You may study, copy, modify and share this work, and build boards for your own
+  use, as long as you give appropriate credit to YoupSpace.
+- You may not use this work for commercial purposes, such as selling boards, kits
+  or derivatives, without written permission from YoupSpace.
+
+Because of the non-commercial clause, this project is source-available, not
+"open source" by the OSHWA or OSI definition.
+
+For commercial use, contact YoupSpace: https://youpspace.com/
+
+Third-party libraries used by the firmware (Adafruit NeoPixel, SparkFun BMP581
+Arduino Library, the arduino-pico core) remain under their own licenses.
+
+AstroNav Mission Control, the desktop application, is closed source and is not
+covered by this license.
