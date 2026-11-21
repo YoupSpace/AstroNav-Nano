@@ -7,7 +7,13 @@
 The AstroNav Nano by [YoupSpace](https://youpspace.com/) logs your whole flight, detects
 apogee and fires your parachute charge. It takes up 20% less board area than the previous
 record holder (BPS.space, 17 × 16 mm) and still saves every flight as a CSV log you can open
-over USB.
+over USB. The complete flight-ready setup (board, battery and holder) weighs about 10 g, so it
+fits the small rockets students and beginners actually fly.
+
+![The AstroNav Nano in its 3D printed holder on a rocket on the launch pad](docs/images/nano-on-pad.jpg)
+
+*On the pad: the Nano in its 3D printed holder next to the AstroNav Lite rocket. The green LED
+means Idle: armed and ready for launch.*
 
 This repository holds the **firmware**. The hardware design files (schematic, PCB, BOM) and the
 3D printable holder and case are on the
@@ -19,14 +25,18 @@ This repository holds the **firmware**. The hardware design files (schematic, PC
 
 ## Specs
 
+![Front and back of the AstroNav Nano with its main components labelled](docs/images/nano-front-back.jpg)
+
 | | |
 |---|---|
 | Size | 16 × 13.6 mm |
-| Microcontroller | Raspberry Pi RP2350A |
+| Weight | about 10 g flight-ready: board, battery and 3D printed holder |
+| PCB | 4 layers |
+| Microcontroller | Raspberry Pi RP2350A, with Winbond flash for firmware and logs |
 | IMU | ICM-45686 (accelerometer + gyroscope, up to 32 G) |
 | Barometer | BMP581 |
 | Power | 1S or 2S LiPo, or 5 V USB, with reverse polarity protection |
-| Power draw | about 0.1 W |
+| Power draw | about 27 mA through a linear 3.3 V regulator (about 0.1 W on 1S) |
 | Logging | 20 samples/s: acceleration, rotation, temperature, pressure, altitude, vertical speed |
 | Storage | 2 MB flash: about 12 typical 60-second flights |
 | Outputs | 1 pyro channel, 2 RGB status LEDs |
