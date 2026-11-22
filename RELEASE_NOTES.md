@@ -1,4 +1,4 @@
-# AstroNav Nano Firmware (next release)
+# AstroNav Nano Firmware v1.2.4
 
 Safety fix found in a real flight log. Updating does not erase your logs or settings. Do a ground test and a toss test before flying.
 
