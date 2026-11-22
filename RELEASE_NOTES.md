@@ -1,3 +1,18 @@
+# AstroNav Nano Firmware (next release)
+
+Safety fix found in a real flight log. Updating does not erase your logs or settings. Do a ground test and a toss test before flying.
+
+## Safety
+
+- **Pyro fired right after burnout when the pad read below 0 m.** At launch the peak altitude was set to the launch altitude and then reset to 0 by the start of the flight log. When the barometer read below its power-on zero on the pad (weather drift, or a sealed bay pushed shut after power-on), the board saw a large "drop from the peak" as soon as it read free fall, declared apogee and fired. The same 0 also passed the minimum-height check. In the flight that showed this, the pad read -88 m and the pyro fired 0.1 s after burnout while the barometer had not moved. The peak now starts at the launch altitude.
+- **No pyro when the barometer does not see the climb.** Whatever `MIN_PYRO_FIRE_HEIGHT_M` is set to, the pyro never fires when the barometer climbed less than 1 m above the launch point. The log shows `PYRO_BLOCKED_REASON=baro_no_climb`. This usually means blocked vent holes or a sealed electronics bay.
+
+## Flight logs
+
+- **New header fields:** `BARO_CLIMB_M`, how far the barometer climbed above the launch point, and `APOGEE_DROP_FROM_PEAK_M`, the drop from the peak at which apogee was declared. Together they show why the board decided apogee and the pyro.
+- **`MAX_ALTITUDE_M` and the `actual_apogee_drop_m` column** were measured from 0 instead of from the real readings, so they were wrong when the altitude was negative.
+- **Max and last flight altitude records** (shown in Mission Control) are now the height above the launch point, not the altitude relative to the power-on zero.
+
 # AstroNav Nano Firmware v1.2.3
 
 Flight logs now save the flight estimates they flew with. Updating does not erase your logs or settings.

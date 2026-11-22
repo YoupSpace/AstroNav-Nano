@@ -97,6 +97,10 @@ static constexpr float FALSE_LAUNCH_MAX_CLIMB_M = 3.0f;
 // If the pyro was blocked only by a momentary barometer glitch, it may still fire
 // shortly after apogee; later than this the parachute timing would be wrong.
 static constexpr uint32_t PYRO_RETRY_WINDOW_MS = 1000;
+// Any real flight climbs more than this on the barometer. Less means the barometer did not
+// see the flight (blocked vent holes, sealed bay, sensor fault): the pyro never fires then,
+// whatever the minimum fire height is set to, and the log says why (baro_no_climb).
+static constexpr float PYRO_BARO_MIN_CLIMB_M = 1.0f;
 static constexpr float LANDING_ALTITUDE_TOLERANCE_M = 2.0f;
 static constexpr float LANDING_VELOCITY_TOLERANCE_MPS = 0.25f;
 static constexpr uint8_t LANDING_CONFIRM_SAMPLES = 20;
@@ -323,6 +327,7 @@ float peakClimbRateMps = 0.0f;   // fastest climb, from accepted barometer sampl
 float peakAccelMagG = 0.0f;
 bool apogeeDetected = false;
 float detectedApogeeAltitudeM = 0.0f;
+float detectedApogeeDropM = 0.0f;   // drop from the peak when apogee was declared
 uint32_t detectedApogeeMs = 0;
 const char *apogeeTrigger = "none";
 const char *landingTrigger = "none";
@@ -348,7 +353,9 @@ const char *pyroBlockedReason = "none";
 uint32_t sampleGaps = 0;
 
 struct MissionLogSummary {
-  float maxAltitudeM = 0.0f;
+  // Starts below any reading: altitudes are relative to the boot baseline and can be
+  // negative, so a 0 start would hide the real maximum and the apogee drop.
+  float maxAltitudeM = -INFINITY;
   float maxSpeedMps = 0.0f;
   float maxAccelG = 0.0f;
   float maxBatteryV = 0.0f;
@@ -1356,7 +1363,7 @@ void startMissionLog() {
     missionLogCount++;
   }
   prelaunchSampleCount = 0;
-  peakAltitude = 0.0f;
+  peakAltitude = currentAltitude;   // the launch code sets the reference right after this
   launchConfirmCount = 0;
   boostDecayConfirmCount = 0;
   apogeeConfirmCount = 0;
@@ -1372,6 +1379,7 @@ void startMissionLog() {
   peakAccelMagG = 0.0f;
   apogeeDetected = false;
   detectedApogeeAltitudeM = 0.0f;
+  detectedApogeeDropM = 0.0f;
   detectedApogeeMs = 0;
   apogeeTrigger = "none";
   landingTrigger = "none";
@@ -1421,14 +1429,16 @@ void finalizeFlightPersonalRecords() {
     return;
   }
 
-  if (peakAltitude > deviceProfile.maxFlightAltitudeM) {
-    deviceProfile.maxFlightAltitudeM = peakAltitude;
+  // Records are the height above the pad, not the altitude relative to the boot baseline.
+  float flightHeightM = fmaxf(0.0f, peakAltitude - launchAltitudeM);
+  if (flightHeightM > deviceProfile.maxFlightAltitudeM) {
+    deviceProfile.maxFlightAltitudeM = flightHeightM;
   }
   if (peakFlightSpeedMps > deviceProfile.maxFlightSpeedMps) {
     deviceProfile.maxFlightSpeedMps = peakFlightSpeedMps;
   }
 
-  deviceProfile.lastFlightAltitudeM = peakAltitude;
+  deviceProfile.lastFlightAltitudeM = flightHeightM;
   deviceProfile.lastFlightSpeedMps = peakFlightSpeedMps;
   persistDeviceProfile();
   flightRecordsPendingSave = false;
@@ -1861,7 +1871,8 @@ size_t writeLogRow(File &logFile, const FlightSample &sample, float peakSoFarM) 
 }
 
 void writeLogSummaryLines(File &logFile, const char *prefix, const MissionLogSummary &summary) {
-  logFile.printf("# %sMAX_ALTITUDE_M=%.2f\n", prefix, summary.maxAltitudeM);
+  float maxAltitudeM = isfinite(summary.maxAltitudeM) ? summary.maxAltitudeM : summary.lastAltitudeM;
+  logFile.printf("# %sMAX_ALTITUDE_M=%.2f\n", prefix, maxAltitudeM);
   logFile.printf("# %sMAX_SPEED_MPS=%.2f\n", prefix, summary.maxSpeedMps);
   logFile.printf("# %sMAX_ACCEL_G=%.2f\n", prefix, summary.maxAccelG);
   logFile.printf("# %sMAX_BATTERY_V=%.2f\n", prefix, summary.maxBatteryV);
@@ -1878,16 +1889,20 @@ void writeLogSummaryLines(File &logFile, const char *prefix, const MissionLogSum
     logFile.printf("# %sPYRO_MIN_BATTERY_V=none\n", prefix);
   }
   logFile.printf("# %sESTIMATED_APOGEE_DROP_M=%.2f\n", prefix, flightApogeeDropM);
-  float actualDropM = fmaxf(0.0f, summary.maxAltitudeM - summary.lastAltitudeM);
+  float actualDropM = fmaxf(0.0f, maxAltitudeM - summary.lastAltitudeM);
   logFile.printf("# %sACTUAL_APOGEE_DROP_M=%.2f\n", prefix, actualDropM);
   logFile.printf("# %sAPOGEE_DROP_ERROR_M=%.2f\n", prefix, actualDropM - flightApogeeDropM);
   if (apogeeDetected) {
     logFile.printf("# %sDETECTED_APOGEE_M=%.2f\n", prefix, detectedApogeeAltitudeM);
     logFile.printf("# %sDETECTED_APOGEE_MS=%lu\n", prefix, static_cast<unsigned long>(detectedApogeeMs));
+    logFile.printf("# %sAPOGEE_DROP_FROM_PEAK_M=%.2f\n", prefix, detectedApogeeDropM);
   } else {
     logFile.printf("# %sDETECTED_APOGEE_M=none\n", prefix);
     logFile.printf("# %sDETECTED_APOGEE_MS=none\n", prefix);
+    logFile.printf("# %sAPOGEE_DROP_FROM_PEAK_M=none\n", prefix);
   }
+  // How far the barometer climbed above the pad before apogee: proves whether it saw the flight.
+  logFile.printf("# %sBARO_CLIMB_M=%.2f\n", prefix, peakAltitude - launchAltitudeM);
   logFile.printf("# %sAPOGEE_TRIGGER=%s\n", prefix, apogeeTrigger);
   logFile.printf("# %sLAUNCH_ALTITUDE_M=%.2f\n", prefix, launchAltitudeM);
   logFile.printf("# %sMIN_PYRO_FIRE_HEIGHT_M=%.1f\n", prefix, flightMinPyroFireHeightM);
@@ -2032,7 +2047,9 @@ void flushMissionLogToFlash() {
   logFile.flush();
   logFile.close();
 
-  peakAltitude = logSummary.maxAltitudeM;
+  if (isfinite(logSummary.maxAltitudeM)) {
+    peakAltitude = logSummary.maxAltitudeM;
+  }
   peakFlightSpeedMps = logSummary.maxSpeedMps;
   peakAccelMagG = logSummary.maxAccelG;
   if (missionLogRowsDropped > 0) {
@@ -2294,8 +2311,13 @@ void tryApogeePyro(bool baroReliable) {
     pyroBlockedReason = "baro_unreliable";
     return;
   }
+  float baroClimbM = peakAltitude - launchAltitudeM;
+  if (baroClimbM < PYRO_BARO_MIN_CLIMB_M) {
+    pyroBlockedReason = "baro_no_climb";
+    return;
+  }
   // Protects people handling an armed board: below this height the pyro never fires.
-  if (peakAltitude - launchAltitudeM < flightMinPyroFireHeightM) {
+  if (baroClimbM < flightMinPyroFireHeightM) {
     pyroBlockedReason = "below_min_height";
     return;
   }
@@ -2382,13 +2404,17 @@ void updateFlightStateFromSamples() {
     }
 
     if (launchConfirmCount >= LAUNCH_CONFIRM_SAMPLES) {
+      // startMissionLog() resets the per-flight state (including peakAltitude), so the
+      // launch reference is set after it. Otherwise the peak stays at 0: with the pad below
+      // the boot baseline (pressure drift, a sealed bay pushed shut) that looks like a large
+      // drop from the peak and declares apogee, and passes the minimum-height check.
+      startMissionLog();
       launchMs = millis();
       launchConfirmCount = 0;
       launchAltitudeM = currentAltitude;
       peakAltitude = currentAltitude;
       apogeePeakHoldCount = 0;
       apogeePeakHoldStartMs = millis();
-      startMissionLog();
       apogeeConfirmCount = 0;
       landingConfirmCount = 0;
       setFlightState(FlightState::Boost);
@@ -2471,6 +2497,7 @@ void updateFlightStateFromSamples() {
     if (apogeeConfirmCount >= requiredApogeeSamples || peakHoldFire || fallbackFire) {
       apogeeDetected = true;
       detectedApogeeAltitudeM = peakAltitude;
+      detectedApogeeDropM = altitudeDropFromPeakM;
       detectedApogeeMs = millis() - bootMs;
       if (apogeeConfirmCount >= requiredApogeeSamples) {
         apogeeTrigger = velocityApogee ? "velocity" : "drop";

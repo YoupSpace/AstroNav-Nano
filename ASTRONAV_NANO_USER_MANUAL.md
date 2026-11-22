@@ -96,7 +96,7 @@ The board enters USB mass-storage mode only when it classifies its input as USB 
 
 The estimate and margin settings are a **baseline**, not a limit: accurate values let the flight controller react faster and more precisely, but apogee and landing are still detected when the real flight is much lower or much higher than estimated.
 
-`MIN_PYRO_FIRE_HEIGHT_M` protects people handling an armed board: if a bump while carrying the rocket is mistaken for a launch, the pyro still cannot fire close to the ground. Only lower it if you fully understand the consequence. Independently of this setting, the pyro never fires when the barometer is unreliable, because parachute timing depends on it.
+`MIN_PYRO_FIRE_HEIGHT_M` protects people handling an armed board: if a bump while carrying the rocket is mistaken for a launch, the pyro still cannot fire close to the ground. Only lower it if you fully understand the consequence. Independently of this setting, the pyro never fires when the barometer is unreliable, because parachute timing depends on it, or when the barometer climbed less than 1 m above the launch point (`PYRO_BLOCKED_REASON=baro_no_climb`). The second case means the barometer did not see the flight, usually because the vent holes are blocked or the electronics bay is sealed.
 
 Recommended beginner procedure:
 
@@ -198,10 +198,10 @@ If the IMU never reads free fall (a tumbling or fast-spinning rocket, or a board
 
 When apogee is confirmed the board enters `Descent`, and:
 
-- with `FIRE_PYRO_APOGEE=TRUE`, the pyro output receives a one-second pulse if the barometer is reliable and the peak is at least `MIN_PYRO_FIRE_HEIGHT_M` above the launch point;
+- with `FIRE_PYRO_APOGEE=TRUE`, the pyro output receives a one-second pulse if the barometer is reliable, climbed at least 1 m above the launch point, and the peak is at least `MIN_PYRO_FIRE_HEIGHT_M` above the launch point;
 - with `FIRE_PYRO_APOGEE=FALSE`, the event is logged but the output is not fired.
 
-`Landed` is declared when one sensor is completely calm and the other shows at most minimal movement (for example wind rocking). A rocket still swinging, for example in a tree, keeps waiting until it settles. A timeout that scales with the real peak height guarantees the log is always saved, also when both sensors have failed. The flight log header records what the board decided: `DETECTED_APOGEE_M`, `APOGEE_TRIGGER`, `PYRO_BLOCKED_REASON`, `LANDING_TRIGGER`, `BARO_REJECTED_SAMPLES` and `SAMPLE_GAPS`.
+`Landed` is declared when one sensor is completely calm and the other shows at most minimal movement (for example wind rocking). A rocket still swinging, for example in a tree, keeps waiting until it settles. A timeout that scales with the real peak height guarantees the log is always saved, also when both sensors have failed. The flight log header records what the board decided: `DETECTED_APOGEE_M`, `APOGEE_TRIGGER`, `APOGEE_DROP_FROM_PEAK_M` (how far below the peak the barometer was when apogee was declared), `BARO_CLIMB_M` (how far the barometer climbed above the launch point), `PYRO_BLOCKED_REASON`, `LANDING_TRIGGER`, `BARO_REJECTED_SAMPLES` and `SAMPLE_GAPS`. A `BARO_CLIMB_M` close to 0 after a real flight means the barometer did not see the flight: check the vent holes.
 
 Sensor fallback can allow healthy sensor paths to continue supporting state logic when another reading is invalid, but fallback behavior is not a reason to ignore warnings or continue an unsafe operation.
 
