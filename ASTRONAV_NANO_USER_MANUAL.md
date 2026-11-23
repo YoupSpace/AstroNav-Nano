@@ -233,7 +233,9 @@ Do not modify the original log. Work on a copy for analysis.
 
 ### Advanced: interpret a CSV log
 
-The log includes a sample counter and time in milliseconds, power mode, flight state, pyro flag, sensor values, derived altitude and velocity, orientation, and health bits. Compare the recorded state transitions with independent mission data and note any warning or fault condition before drawing conclusions.
+The log includes a sample counter and time in milliseconds, power mode, flight state, pyro flag, sensor values, derived altitude and velocity, orientation, and health bits. Orientation comes in three columns. `roll_deg` and `pitch_deg` come from the accelerometer: `pitch_deg` is the angle of the rocket body above the horizon (90 is straight up), and both are only reliable while the rocket is still, on the pad or after landing. `yaw_deg` (the last column) is the turn about the board Z axis since launch, added up from the gyro at each sample. The accelerometer cannot measure yaw, so it starts at 0 at launch, stays 0 in the samples before launch, and drifts a few degrees over a flight. Logs from firmware v1.2.4 and older have no `yaw_deg` column.
+
+Compare the recorded state transitions with independent mission data and note any warning or fault condition before drawing conclusions.
 
 ## 10. Optional pro features and test controls
 

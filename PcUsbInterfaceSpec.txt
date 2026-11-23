@@ -136,6 +136,7 @@ Mission log behavior
   - vertical_velocity_mps
   - roll_deg
   - pitch_deg
+  - yaw_deg (newer firmware only; turn about the board Z axis since launch, from the gyro)
   - health_bits
 - The log is intended to be rich enough for post-flight analysis and debugging.
 - The current sample rate is approximately 10 samples per second and is designed to be responsive without overloading the system.
