@@ -1,4 +1,6 @@
-# AstroNav Nano Firmware (next release)
+# AstroNav Nano Firmware v1.2.5
+
+Flight logs now record yaw. Updating does not erase your logs or settings. AstroNav MC 0.4.3 shows it as the Yaw rocket in Overlay studio.
 
 ## Flight logs
 
