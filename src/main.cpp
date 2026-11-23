@@ -197,6 +197,8 @@ struct FlightSample {
   int16_t tempCd10 = 0;
   uint16_t pressureHd10 = 0;
   int16_t batteryVoltageMv = 0;
+  // Fills the padding before altitudeCm, so a sample (and the RAM log) does not grow.
+  int16_t yawD10 = 0;
   // 32-bit so high and fast flights do not saturate (16-bit cm would cap at 327 m and 327 m/s).
   // The apogee-drop CSV columns are derived from these when the log is written.
   int32_t altitudeCm = 0;
@@ -208,6 +210,8 @@ struct FlightSample {
   uint8_t pyro = 0;
   uint8_t baroRejected = 0;
 };
+// The RAM log holds FLIGHT_LOG_CAPACITY of these: a bigger sample costs about 6 KB per byte.
+static_assert(sizeof(FlightSample) == 44, "FlightSample grew; check the RAM log size");
 
 struct FlightSettings {
   float estimatedHeightM = 120.0f;
@@ -296,6 +300,13 @@ float currentAltitude = 0.0f;
 float currentVerticalVelocity = 0.0f;
 float currentRollDeg = 0.0f;
 float currentPitchDeg = 0.0f;
+// Yaw: rotation about the board Z axis since launch, adding up the bias-corrected gyro at the
+// sample tick. The accelerometer cannot see yaw, so it is relative (0 at launch) and drifts
+// slowly. Board X is the rocket's long axis, so this is a turn across it, like pitch.
+float currentYawDeg = 0.0f;
+uint32_t yawLastSampleMs = 0;
+// A longer gap between ticks (a stalled loop) is skipped rather than added as one big step.
+static constexpr uint32_t YAW_MAX_STEP_MS = 200;
 float baselinePressureHpa = 0.0f;
 float filteredTemperature = 0.0f;
 float filteredPressure = 0.0f;
@@ -1371,6 +1382,7 @@ void startMissionLog() {
   landingConfirmCount = 0;
   apogeePeakHoldCount = 0;
   apogeePeakHoldStartMs = 0;
+  currentYawDeg = 0.0f;
   missionStarted = true;
   missionLogFlushed = false;
   flightRecordsPendingSave = true;
@@ -1479,6 +1491,7 @@ void appendMissionSample() {
   sample.velocityCms = static_cast<int32_t>(lroundf(clampFloat(currentVerticalVelocity * 100.0f, -2.0e9f, 2.0e9f)));
   sample.rollD10 = static_cast<int16_t>(lroundf(clampFloat(currentRollDeg * 10.0f, -32768.0f, 32767.0f)));
   sample.pitchD10 = static_cast<int16_t>(lroundf(clampFloat(currentPitchDeg * 10.0f, -32768.0f, 32767.0f)));
+  sample.yawD10 = static_cast<int16_t>(lroundf(clampFloat(currentYawDeg * 10.0f, -32768.0f, 32767.0f)));
   sample.healthBits = healthBits();
   sample.state = static_cast<uint8_t>(flightState);
   sample.pyro = pyroLatched ? 1u : 0u;
@@ -1673,6 +1686,23 @@ void enterFlightModeFromUsb() {
 
 // Debug only, read-only: never touches the pyro or the flight logic. Runs in the sample tick
 // and stops by itself after GYRO_TEST_DURATION_MS, or as soon as the board leaves Idle.
+// Adds this tick's turn about the board Z axis to the yaw, during a mission only. Runs once per
+// sample tick on the reading the tick already took; it changes nothing else.
+void updateYaw(bool imuSampleOk, uint32_t now) {
+  uint32_t elapsedMs = now - yawLastSampleMs;
+  yawLastSampleMs = now;
+  if (!missionStarted || !imuSampleOk || elapsedMs == 0 || elapsedMs > YAW_MAX_STEP_MS) {
+    return;
+  }
+  currentYawDeg += (currentGz - gyroBiasZ) * (static_cast<float>(elapsedMs) / 1000.0f);
+  // Keep it in -180..180 so the 0.1 degree log column never saturates on a spinning rocket.
+  currentYawDeg = fmodf(currentYawDeg + 180.0f, 360.0f);
+  if (currentYawDeg < 0.0f) {
+    currentYawDeg += 360.0f;
+  }
+  currentYawDeg -= 180.0f;
+}
+
 void updateGyroTest(bool imuSampleOk, uint32_t now) {
   if (!gyroTestActive) {
     return;
@@ -1844,7 +1874,7 @@ size_t writeLogRow(File &logFile, const FlightSample &sample, float peakSoFarM) 
   float actualApogeeDropM = fmaxf(0.0f, peakSoFarM - altitudeM);
   char row[LOG_ROW_MAX_BYTES];
   int length = snprintf(row, sizeof(row),
-    "%lu;%lu;%s;%s;%u;%.3f;%.3f;%.3f;%.2f;%.2f;%.2f;%.1f;%.2f;%.2f;%.2f;%.2f;%.1f;%.1f;%.2f;%.2f;%.2f;%u;%u\n",
+    "%lu;%lu;%s;%s;%u;%.3f;%.3f;%.3f;%.2f;%.2f;%.2f;%.1f;%.2f;%.2f;%.2f;%.2f;%.1f;%.1f;%.2f;%.2f;%.2f;%u;%u;%.1f\n",
     static_cast<unsigned long>(sample.counter),
     static_cast<unsigned long>(sample.ms),
     stateText(static_cast<FlightState>(sample.state)),
@@ -1862,7 +1892,8 @@ size_t writeLogRow(File &logFile, const FlightSample &sample, float peakSoFarM) 
     actualApogeeDropM,
     actualApogeeDropM - flightApogeeDropM,
     static_cast<unsigned>(sample.healthBits),
-    static_cast<unsigned>(sample.baroRejected));
+    static_cast<unsigned>(sample.baroRejected),
+    sample.yawD10 / 10.0f);
   if (length <= 0 || static_cast<size_t>(length) >= sizeof(row)) {
     return 0;
   }
@@ -1933,7 +1964,7 @@ void writeLogHeader(File &logFile, bool summaryIsFinal, const MissionLogSummary 
   logFile.printf("# HEIGHT_MARGIN_M=%.2f\n", flightSettings.heightMarginM);
   logFile.printf("# ESTIMATED_SPEED_MPS=%.2f\n", flightSettings.estimatedSpeedMps);
   logFile.printf("# SPEED_MARGIN_MPS=%.2f\n", flightSettings.speedMarginMps);
-  logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;battery_v;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits;baro_rejected");
+  logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;battery_v;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits;baro_rejected;yaw_deg");
 }
 
 MissionLogSummary previewLogSummary() {
@@ -2883,6 +2914,7 @@ void loop() {
       updateFlightStateFromSamples();
     }
     updateGyroTest(imuSampleOk, now);
+    updateYaw(imuSampleOk, now);
 
     if (missionStarted || flightState == FlightState::Idle) {
       appendMissionSample();

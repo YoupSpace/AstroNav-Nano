@@ -1,3 +1,9 @@
+# AstroNav Nano Firmware (next release)
+
+## Flight logs
+
+- **New column `yaw_deg`** at the end of every log row: the turn about the board Z axis since launch, added up from the gyro at each 50 ms sample. It is 0 at launch and before it. Roll and pitch come from the accelerometer, which cannot see yaw, so this is the first yaw in the log. It is relative and drifts a few degrees over a flight. Sampling, flight decisions and the pyro are unchanged, and the log does not use more memory.
+
 # AstroNav Nano Firmware v1.2.4
 
 Safety fix found in a real flight log. Updating does not erase your logs or settings. Do a ground test and a toss test before flying.
